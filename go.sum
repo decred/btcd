@@ -8,6 +8,7 @@ github.com/btcsuite/snappy-go v1.0.0 h1:ZxaA6lo2EpxGddsA8JwWOcxlzRybb444sgmeJQMJ
 github.com/btcsuite/snappy-go v1.0.0/go.mod h1:8woku9dyThutzjeg+3xrA5iCpBRH8XEEg3lh6TiUghc=
 github.com/btcsuite/winsvc v1.0.0 h1:J9B4L7e3oqhXOcm+2IuNApwzQec85lE+QaikUcCs+dk=
 github.com/btcsuite/winsvc v1.0.0/go.mod h1:jsenWakMcC0zFBFurPLEAyrnc/teJEM1O46fmI40EZs=
+github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dchest/blake256 v1.0.0 h1:6gUgI5MHdz9g0TdrgKqXsoDX+Zjxmm1Sc6OsoGru50I=
@@ -38,6 +39,9 @@ github.com/decred/dcrd/dcrec/edwards v0.0.0-20190130161649-59ed4247a1d5 h1:qA+q5
 github.com/decred/dcrd/dcrec/edwards v0.0.0-20190130161649-59ed4247a1d5/go.mod h1:+ehP0Hk/mesyZXttxCtBbhPX23BMpZJ1pcVBqUfbmvU=
 github.com/decred/dcrd/dcrec/secp256k1 v1.0.1 h1:EFWVd1p0t0Y5tnsm/dJujgV0ORogRJ6vo7CMAjLseAc=
 github.com/decred/dcrd/dcrec/secp256k1 v1.0.1/go.mod h1:lhu4eZFSfTJWUnR3CFRcpD+Vta0KUAqnhTsTksHXgy0=
+github.com/decred/dcrd/dcrjson v1.0.0/go.mod h1:ozddIaeF+EAvZZvFuB3zpfxhyxBGfvbt22crQh+PYuI=
+github.com/decred/dcrd/dcrjson v1.2.0 h1:3BFFQHq3/YO/zae9WLxQkXsX6AXKx3+M8H3yk4oXZi0=
+github.com/decred/dcrd/dcrjson v1.2.0/go.mod h1:ozddIaeF+EAvZZvFuB3zpfxhyxBGfvbt22crQh+PYuI=
 github.com/decred/dcrd/dcrjson/v2 v2.0.0 h1:W0q4Alh36c5N318eUpfmU8kXoCNgImMLI87NIXni9Us=
 github.com/decred/dcrd/dcrjson/v2 v2.0.0/go.mod h1:FYueNy8BREAFq04YNEwcTsmGFcNqY+ehUUO81w2igi4=
 github.com/decred/dcrd/dcrutil v1.2.0 h1:Pd5Wf650g6Xu6luYDfGkh1yiUoPUAgqzRu6K+BGyJGg=
@@ -54,6 +58,8 @@ github.com/decred/dcrd/mining v1.1.0 h1:9Wtla+i+pEjfYsNCfixsipmyyoB26DgL4LSXWAin
 github.com/decred/dcrd/mining v1.1.0/go.mod h1:NQEtX604XgNwKcPFId1hVTTiBqmVQDlnqV1yNqGl4oU=
 github.com/decred/dcrd/peer v1.1.0 h1:Il05Vzt2uW6cOCISJgT3rTtJ0BEs/09bSvivGMmQt8g=
 github.com/decred/dcrd/peer v1.1.0/go.mod h1:dkGofVzL5OaXrdL4fyFP/v6BsIQHtkTA3ffDOiqaEjQ=
+github.com/decred/dcrd/rpcclient v1.1.0 h1:nQZ1qOJaLYoOTM1oQ2dLaqocb5TWI7gNBK+BTY7UVXk=
+github.com/decred/dcrd/rpcclient v1.1.0/go.mod h1:SCwBs4d+aqRV2ChnriIZ1y/LgNVHG/2ieEC1vIop82s=
 github.com/decred/dcrd/rpcclient/v2 v2.0.0 h1:Zy9twdEaOGUdCj/89LAs/IrStm6FcabxzBve4UsA73A=
 github.com/decred/dcrd/rpcclient/v2 v2.0.0/go.mod h1:9XjbRHBSNqN+DXz8I47gUZszvVjvugqLGK8TZQ4c/u0=
 github.com/decred/dcrd/txscript v1.0.2 h1:kzJZDuteyzvI15VNhtgFHxeeq210RTkFyfzN7d+1iPo=
@@ -68,6 +74,7 @@ github.com/fsnotify/fsnotify v1.4.7 h1:IXs+QLmnXW2CcXuY+8Mzv/fWEsPGWxqefPtCP5CnV
 github.com/fsnotify/fsnotify v1.4.7/go.mod h1:jwhsz4b93w/PPRr/qN1Yymfu8t87LnFCMoQvtojpjFo=
 github.com/golang/protobuf v1.2.0 h1:P3YflyNX/ehuJFLhxviNdFxQPkGK5cDcApsge1SqnvM=
 github.com/golang/protobuf v1.2.0/go.mod h1:6lQm79b+lXiMfvg/cZm0SGofjICqVBUtrP5yJMmIC1U=
+github.com/gorilla/websocket v1.2.0/go.mod h1:E7qHFY5m1UJ88s3WnNqhKjPHQ0heANvMoAMk2YaljkQ=
 github.com/gorilla/websocket v1.4.0 h1:WDFjx/TMzVgy9VdMMQi2K2Emtwi2QcUQsztZ/zLaH/Q=
 github.com/gorilla/websocket v1.4.0/go.mod h1:E7qHFY5m1UJ88s3WnNqhKjPHQ0heANvMoAMk2YaljkQ=
 github.com/hpcloud/tail v1.0.0 h1:nfCOvKYfkgYP8hkirhJocXT2+zOD8yUNjXaWfTlyFKI=

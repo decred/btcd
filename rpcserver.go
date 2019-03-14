@@ -2722,7 +2722,7 @@ func handleGetBlockTemplateLongPoll(s *rpcServer, longPollID string, useCoinbase
 	case <-closeChan:
 		return nil, ErrClientQuit
 
-	// Wait until signal received to send the reply.
+		// Wait until signal received to send the reply.
 	case <-longPollChan:
 		// Fallthrough
 	}

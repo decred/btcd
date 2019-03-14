@@ -13,6 +13,7 @@ require (
 	github.com/decred/dcrd/connmgr v1.0.2
 	github.com/decred/dcrd/database v1.0.3
 	github.com/decred/dcrd/dcrec/secp256k1 v1.0.1
+	github.com/decred/dcrd/dcrjson v1.2.0
 	github.com/decred/dcrd/dcrjson/v2 v2.0.0
 	github.com/decred/dcrd/dcrutil v1.2.0
 	github.com/decred/dcrd/fees v1.0.0
@@ -21,6 +22,7 @@ require (
 	github.com/decred/dcrd/mempool/v2 v2.0.0
 	github.com/decred/dcrd/mining v1.1.0
 	github.com/decred/dcrd/peer v1.1.0
+	github.com/decred/dcrd/rpcclient v1.1.0
 	github.com/decred/dcrd/rpcclient/v2 v2.0.0
 	github.com/decred/dcrd/txscript v1.0.2
 	github.com/decred/dcrd/wire v1.2.0

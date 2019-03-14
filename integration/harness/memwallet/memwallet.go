@@ -1,15 +1,15 @@
-// Copyright (c) 2016-2017 The btcsuite developers
-// Copyright (c) 2017-2019 The Decred developers
+// Copyright (c) 2018 The btcsuite developers
+// Copyright (c) 2018 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package rpctest
+package memwallet
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/decred/dcrd/blockchain"
 	"github.com/decred/dcrd/chaincfg"
@@ -17,60 +17,18 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1"
 	"github.com/decred/dcrd/dcrutil"
 	"github.com/decred/dcrd/hdkeychain"
-	"github.com/decred/dcrd/rpcclient/v2"
+	"github.com/decred/dcrd/integration"
+	"github.com/decred/dcrd/integration/harness"
+	"github.com/decred/dcrd/rpcclient"
 	"github.com/decred/dcrd/txscript"
 	"github.com/decred/dcrd/wire"
 )
 
-var (
-	// hdSeed is the BIP 32 seed used by the memWallet to initialize it's
-	// HD root key. This value is hard coded in order to ensure
-	// deterministic behavior across test runs.
-	hdSeed = [chainhash.HashSize]byte{
-		0x79, 0xa6, 0x1a, 0xdb, 0xc6, 0xe5, 0xa2, 0xe1,
-		0x39, 0xd2, 0x71, 0x3a, 0x54, 0x6e, 0xc7, 0xc8,
-		0x75, 0x63, 0x2e, 0x75, 0xf1, 0xdf, 0x9c, 0x3f,
-		0xa6, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	}
-)
-
-// utxo represents an unspent output spendable by the memWallet. The maturity
-// height of the transaction is recorded in order to properly observe the
-// maturity period of direct coinbase outputs.
-type utxo struct {
-	pkScript       []byte
-	value          dcrutil.Amount
-	maturityHeight int64
-	keyIndex       uint32
-	isLocked       bool
-}
-
-// isMature returns true if the target utxo is considered "mature" at the
-// passed block height. Otherwise, false is returned.
-func (u *utxo) isMature(height int64) bool {
-	return height >= u.maturityHeight
-}
-
-// chainUpdate encapsulates an update to the current main chain. This struct is
-// used to sync up the memWallet each time a new block is connected to the main
-// chain.
-type chainUpdate struct {
-	blockHeight  int64
-	filteredTxns []*dcrutil.Tx
-}
-
-// undoEntry is functionally the opposite of a chainUpdate. An undoEntry is
-// created for each new block received, then stored in a log in order to
-// properly handle block re-orgs.
-type undoEntry struct {
-	utxosDestroyed map[wire.OutPoint]*utxo
-	utxosCreated   []wire.OutPoint
-}
-
-// memWallet is a simple in-memory wallet whose purpose is to provide basic
+// InMemoryWallet is a simple in-memory wallet whose purpose is to provide basic
 // wallet functionality to the harness. The wallet uses a hard-coded HD key
 // hierarchy which promotes reproducibility between harness test runs.
-type memWallet struct {
+// Implements harness.TestWallet.
+type InMemoryWallet struct {
 	coinbaseKey  *secp256k1.PrivateKey
 	coinbaseAddr dcrutil.Address
 
@@ -97,89 +55,121 @@ type memWallet struct {
 	// disconnected block on the wallet's set of spendable utxos.
 	reorgJournal map[int64]*undoEntry
 
-	chainUpdates      []*chainUpdate
-	chainUpdateSignal chan struct{}
-	chainMtx          sync.Mutex
+	chainUpdates []*chainUpdate
+
+	// chainUpdateSignal is a wallet event queue
+	chainUpdateSignal chan string
+
+	chainMtx sync.Mutex
 
 	net *chaincfg.Params
 
-	rpc *rpcclient.Client
+	nodeRPC *rpcclient.Client
 
 	sync.RWMutex
 }
 
-// newMemWallet creates and returns a fully initialized instance of the
-// memWallet given a particular blockchain's parameters.
-func newMemWallet(net *chaincfg.Params, harnessID uint32) (*memWallet, error) {
-	// The wallet's final HD seed is: hdSeed || harnessID. This method
-	// ensures that each harness instance uses a deterministic root seed
-	// based on its harness ID.
-	var harnessHDSeed [chainhash.HashSize + 4]byte
-	copy(harnessHDSeed[:], hdSeed[:])
-	binary.BigEndian.PutUint32(harnessHDSeed[:chainhash.HashSize], harnessID)
-
-	hdRoot, err := hdkeychain.NewMaster(harnessHDSeed[:], net)
-	if err != nil {
-		return nil, nil
-	}
-
-	// The first child key from the hd root is reserved as the coinbase
-	// generation address.
-	coinbaseChild, err := hdRoot.Child(0)
-	if err != nil {
-		return nil, err
-	}
-	coinbaseKey, err := coinbaseChild.ECPrivKey()
-	if err != nil {
-		return nil, err
-	}
-	coinbaseAddr, err := keyToAddr(coinbaseKey, net)
-	if err != nil {
-		return nil, err
-	}
-
-	// Track the coinbase generation address to ensure we properly track
-	// newly generated coins we can spend.
-	addrs := make(map[uint32]dcrutil.Address)
-	addrs[0] = coinbaseAddr
-
-	return &memWallet{
-		net:               net,
-		coinbaseKey:       coinbaseKey,
-		coinbaseAddr:      coinbaseAddr,
-		hdIndex:           1,
-		hdRoot:            hdRoot,
-		addrs:             addrs,
-		utxos:             make(map[wire.OutPoint]*utxo),
-		chainUpdateSignal: make(chan struct{}),
-		reorgJournal:      make(map[int64]*undoEntry),
-	}, nil
+// Network returns current network of the wallet
+func (wallet *InMemoryWallet) Network() *chaincfg.Params {
+	return wallet.net
 }
 
-// Start launches all goroutines required for the wallet to function properly.
-func (m *memWallet) Start() {
-	go m.chainSyncer()
+// Start wallet process
+func (wallet *InMemoryWallet) Start(args *harness.TestWalletStartArgs) error {
+	handlers := &rpcclient.NotificationHandlers{}
+
+	// If a handler for the OnBlockConnected/OnBlockDisconnected callback
+	// has already been set, then we create a wrapper callback which
+	// executes both the currently registered callback, and the mem
+	// wallet's callback.
+	if handlers.OnBlockConnected != nil {
+		obc := handlers.OnBlockConnected
+		handlers.OnBlockConnected = func(header []byte, filteredTxns [][]byte) {
+			wallet.IngestBlock(header, filteredTxns)
+			obc(header, filteredTxns)
+		}
+	} else {
+		// Otherwise, we can claim the callback ourselves.
+		handlers.OnBlockConnected = wallet.IngestBlock
+	}
+	if handlers.OnBlockDisconnected != nil {
+		obd := handlers.OnBlockDisconnected
+		handlers.OnBlockDisconnected = func(header []byte) {
+			wallet.UnwindBlock(header)
+			obd(header)
+		}
+	} else {
+		handlers.OnBlockDisconnected = wallet.UnwindBlock
+	}
+
+	//handlers.OnClientConnected = wallet.onDcrdConnect
+
+	wallet.nodeRPC = harness.NewRPCConnection(args.NodeRPCConfig, 5, handlers)
+	integration.AssertNotNil("nodeRPC", wallet.nodeRPC)
+
+	// Filter transactions that pay to the coinbase associated with the
+	// wallet.
+	wallet.updateTxFilter()
+
+	// Ensure dcrd properly dispatches our registered call-back for each new
+	// block. Otherwise, the InMemoryWallet won't function properly.
+	err := wallet.nodeRPC.NotifyBlocks()
+	integration.CheckTestSetupMalfunction(err)
+
+	go wallet.chainSyncer()
+	return nil
+}
+
+func (wallet *InMemoryWallet) updateTxFilter() {
+	filterAddrs := []dcrutil.Address{}
+	for _, v := range wallet.addrs {
+		filterAddrs = append(filterAddrs, v)
+	}
+	err := wallet.nodeRPC.LoadTxFilter(true, filterAddrs, nil)
+	integration.CheckTestSetupMalfunction(err)
+}
+
+// Stop wallet process gently, by sending stopSignal to the wallet event queue
+func (wallet *InMemoryWallet) Stop() {
+	go func() {
+		wallet.chainUpdateSignal <- stopSignal
+	}()
+	wallet.nodeRPC.Disconnect()
+	wallet.nodeRPC = nil
+}
+
+// Sync block until the wallet has fully synced up to the tip of the main
+// chain.
+func (wallet *InMemoryWallet) Sync() {
+	_, height, err := wallet.nodeRPC.GetBestBlock()
+	integration.CheckTestSetupMalfunction(err)
+	ticker := time.NewTicker(time.Millisecond * 100)
+	for range ticker.C {
+		walletHeight := wallet.SyncedHeight()
+		if walletHeight == height {
+			break
+		}
+	}
+}
+
+// Dispose is no needed for InMemoryWallet
+func (wallet *InMemoryWallet) Dispose() error {
+	return nil
 }
 
 // SyncedHeight returns the height the wallet is known to be synced to.
 //
 // This function is safe for concurrent access.
-func (m *memWallet) SyncedHeight() int64 {
-	m.RLock()
-	defer m.RUnlock()
-	return m.currentHeight
-}
-
-// SetRPCClient saves the passed rpc connection to dcrd as the wallet's
-// personal rpc connection.
-func (m *memWallet) SetRPCClient(rpcClient *rpcclient.Client) {
-	m.rpc = rpcClient
+func (wallet *InMemoryWallet) SyncedHeight() int64 {
+	wallet.RLock()
+	defer wallet.RUnlock()
+	return wallet.currentHeight
 }
 
 // IngestBlock is a call-back which is to be triggered each time a new block is
 // connected to the main chain. Ingesting a block updates the wallet's internal
 // utxo state based on the outputs created and destroyed within each block.
-func (m *memWallet) IngestBlock(header []byte, filteredTxns [][]byte) {
+func (m *InMemoryWallet) IngestBlock(header []byte, filteredTxns [][]byte) {
 	var hdr wire.BlockHeader
 	if err := hdr.FromBytes(header); err != nil {
 		panic(err)
@@ -205,31 +195,58 @@ func (m *memWallet) IngestBlock(header []byte, filteredTxns [][]byte) {
 	// available. We do this in a new goroutine in order to avoid blocking
 	// the main loop of the rpc client.
 	go func() {
-		m.chainUpdateSignal <- struct{}{}
+		m.chainUpdateSignal <- chainUpdateSignal
 	}()
+}
+
+// ingestBlock updates the wallet's internal utxo state based on the outputs
+// created and destroyed within each block.
+func (wallet *InMemoryWallet) ingestBlock(update *chainUpdate) {
+	// Update the latest synced height, then process each filtered
+	// transaction in the block creating and destroying utxos within
+	// the wallet as a result.
+	wallet.currentHeight = update.blockHeight
+	undo := &undoEntry{
+		utxosDestroyed: make(map[wire.OutPoint]*utxo),
+	}
+	for _, tx := range update.filteredTxns {
+		mtx := tx.MsgTx()
+		isCoinbase := blockchain.IsCoinBaseTx(mtx)
+		txHash := mtx.TxHash()
+		wallet.evalOutputs(mtx.TxOut, &txHash, isCoinbase, undo)
+		wallet.evalInputs(mtx.TxIn, undo)
+	}
+
+	// Finally, record the undo entry for this block so we can
+	// properly update our internal state in response to the block
+	// being re-org'd from the main chain.
+	wallet.reorgJournal[update.blockHeight] = undo
 }
 
 // chainSyncer is a goroutine dedicated to processing new blocks in order to
 // keep the wallet's utxo state up to date.
 //
 // NOTE: This MUST be run as a goroutine.
-func (m *memWallet) chainSyncer() {
+func (wallet *InMemoryWallet) chainSyncer() {
 	var update *chainUpdate
 
-	for range m.chainUpdateSignal {
+	for s := range wallet.chainUpdateSignal {
+		if s == stopSignal {
+			break
+		}
 		// A new update is available, so pop the new chain update from
 		// the front of the update queue.
-		m.chainMtx.Lock()
-		update = m.chainUpdates[0]
-		m.chainUpdates[0] = nil // Set to nil to prevent GC leak.
-		m.chainUpdates = m.chainUpdates[1:]
-		m.chainMtx.Unlock()
+		wallet.chainMtx.Lock()
+		update = wallet.chainUpdates[0]
+		wallet.chainUpdates[0] = nil // Set to nil to prevent GC leak.
+		wallet.chainUpdates = wallet.chainUpdates[1:]
+		wallet.chainMtx.Unlock()
 
 		// Update the latest synced height, then process each filtered
 		// transaction in the block creating and destroying utxos within
 		// the wallet as a result.
-		m.Lock()
-		m.currentHeight = update.blockHeight
+		wallet.Lock()
+		wallet.currentHeight = update.blockHeight
 		undo := &undoEntry{
 			utxosDestroyed: make(map[wire.OutPoint]*utxo),
 		}
@@ -237,27 +254,27 @@ func (m *memWallet) chainSyncer() {
 			mtx := tx.MsgTx()
 			isCoinbase := blockchain.IsCoinBaseTx(mtx)
 			txHash := mtx.TxHash()
-			m.evalOutputs(mtx.TxOut, &txHash, isCoinbase, undo)
-			m.evalInputs(mtx.TxIn, undo)
+			wallet.evalOutputs(mtx.TxOut, &txHash, isCoinbase, undo)
+			wallet.evalInputs(mtx.TxIn, undo)
 		}
 
 		// Finally, record the undo entry for this block so we can
 		// properly update our internal state in response to the block
 		// being re-org'd from the main chain.
-		m.reorgJournal[update.blockHeight] = undo
-		m.Unlock()
+		wallet.reorgJournal[update.blockHeight] = undo
+		wallet.Unlock()
 	}
 }
 
 // evalOutputs evaluates each of the passed outputs, creating a new matching
 // utxo within the wallet if we're able to spend the output.
-func (m *memWallet) evalOutputs(outputs []*wire.TxOut, txHash *chainhash.Hash, isCoinbase bool, undo *undoEntry) {
+func (wallet *InMemoryWallet) evalOutputs(outputs []*wire.TxOut, txHash *chainhash.Hash, isCoinbase bool, undo *undoEntry) {
 	for i, output := range outputs {
 		pkScript := output.PkScript
 
 		// Scan all the addresses we currently control to see if the
 		// output is paying to us.
-		for keyIndex, addr := range m.addrs {
+		for keyIndex, addr := range wallet.addrs {
 			pkHash := addr.ScriptAddress()
 			if !bytes.Contains(pkScript, pkHash) {
 				continue
@@ -268,11 +285,11 @@ func (m *memWallet) evalOutputs(outputs []*wire.TxOut, txHash *chainhash.Hash, i
 			// future.
 			var maturityHeight int64
 			if isCoinbase {
-				maturityHeight = m.currentHeight + int64(m.net.CoinbaseMaturity)
+				maturityHeight = wallet.currentHeight + int64(wallet.net.CoinbaseMaturity)
 			}
 
 			op := wire.OutPoint{Hash: *txHash, Index: uint32(i)}
-			m.utxos[op] = &utxo{
+			wallet.utxos[op] = &utxo{
 				value:          dcrutil.Amount(output.Value),
 				keyIndex:       keyIndex,
 				maturityHeight: maturityHeight,
@@ -285,23 +302,23 @@ func (m *memWallet) evalOutputs(outputs []*wire.TxOut, txHash *chainhash.Hash, i
 
 // evalInputs scans all the passed inputs, destroying any utxos within the
 // wallet which are spent by an input.
-func (m *memWallet) evalInputs(inputs []*wire.TxIn, undo *undoEntry) {
+func (wallet *InMemoryWallet) evalInputs(inputs []*wire.TxIn, undo *undoEntry) {
 	for _, txIn := range inputs {
 		op := txIn.PreviousOutPoint
-		oldUtxo, ok := m.utxos[op]
+		oldUtxo, ok := wallet.utxos[op]
 		if !ok {
 			continue
 		}
 
 		undo.utxosDestroyed[op] = oldUtxo
-		delete(m.utxos, op)
+		delete(wallet.utxos, op)
 	}
 }
 
 // UnwindBlock is a call-back which is to be executed each time a block is
 // disconnected from the main chain. Unwinding a block undoes the effect that a
 // particular block had on the wallet's internal utxo state.
-func (m *memWallet) UnwindBlock(header []byte) {
+func (m *InMemoryWallet) UnwindBlock(header []byte) {
 	var hdr wire.BlockHeader
 	if err := hdr.FromBytes(header); err != nil {
 		panic(err)
@@ -324,13 +341,29 @@ func (m *memWallet) UnwindBlock(header []byte) {
 	delete(m.reorgJournal, height)
 }
 
+// unwindBlock undoes the effect that a particular block had on the wallet's
+// internal utxo state.
+func (wallet *InMemoryWallet) unwindBlock(update *chainUpdate) {
+	undo := wallet.reorgJournal[update.blockHeight]
+
+	for _, utxo := range undo.utxosCreated {
+		delete(wallet.utxos, utxo)
+	}
+
+	for outPoint, utxo := range undo.utxosDestroyed {
+		wallet.utxos[outPoint] = utxo
+	}
+
+	delete(wallet.reorgJournal, update.blockHeight)
+}
+
 // newAddress returns a new address from the wallet's hd key chain.  It also
 // loads the address into the RPC client's transaction filter to ensure any
 // transactions that involve it are delivered via the notifications.
-func (m *memWallet) newAddress() (dcrutil.Address, error) {
-	index := m.hdIndex
+func (wallet *InMemoryWallet) newAddress() (dcrutil.Address, error) {
+	index := wallet.hdIndex
 
-	childKey, err := m.hdRoot.Child(index)
+	childKey, err := wallet.hdRoot.Child(index)
 	if err != nil {
 		return nil, err
 	}
@@ -339,19 +372,19 @@ func (m *memWallet) newAddress() (dcrutil.Address, error) {
 		return nil, err
 	}
 
-	addr, err := keyToAddr(privKey, m.net)
+	addr, err := keyToAddr(privKey, wallet.net)
 	if err != nil {
 		return nil, err
 	}
 
-	err = m.rpc.LoadTxFilter(false, []dcrutil.Address{addr}, nil)
+	err = wallet.nodeRPC.LoadTxFilter(false, []dcrutil.Address{addr}, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	m.addrs[index] = addr
+	wallet.addrs[index] = addr
 
-	m.hdIndex++
+	wallet.hdIndex++
 
 	return addr, nil
 }
@@ -359,11 +392,11 @@ func (m *memWallet) newAddress() (dcrutil.Address, error) {
 // NewAddress returns a fresh address spendable by the wallet.
 //
 // This function is safe for concurrent access.
-func (m *memWallet) NewAddress() (dcrutil.Address, error) {
-	m.Lock()
-	defer m.Unlock()
+func (wallet *InMemoryWallet) NewAddress(_ *harness.NewAddressArgs) (dcrutil.Address, error) {
+	wallet.Lock()
+	defer wallet.Unlock()
 
-	return m.newAddress()
+	return wallet.newAddress()
 }
 
 // fundTx attempts to fund a transaction sending amt coins.  The coins are
@@ -371,8 +404,8 @@ func (m *memWallet) NewAddress() (dcrutil.Address, error) {
 // the passed fee rate.  The passed fee rate should be expressed in
 // atoms-per-byte.
 //
-// NOTE: The memWallet's mutex must be held when this function is called.
-func (m *memWallet) fundTx(tx *wire.MsgTx, amt dcrutil.Amount, feeRate dcrutil.Amount) error {
+// NOTE: The InMemoryWallet's mutex must be held when this function is called.
+func (wallet *InMemoryWallet) fundTx(tx *wire.MsgTx, amt dcrutil.Amount, feeRate dcrutil.Amount) error {
 	const (
 		// spendSize is the largest number of bytes of a sigScript
 		// which spends a p2pkh output: OP_DATA_73 <sig> OP_DATA_33 <pubkey>
@@ -384,10 +417,10 @@ func (m *memWallet) fundTx(tx *wire.MsgTx, amt dcrutil.Amount, feeRate dcrutil.A
 		txSize      int
 	)
 
-	for outPoint, utxo := range m.utxos {
+	for outPoint, utxo := range wallet.utxos {
 		// Skip any outputs that are still currently immature or are
 		// currently locked.
-		if !utxo.isMature(m.currentHeight) || utxo.isLocked {
+		if !utxo.isMature(wallet.currentHeight) || utxo.isLocked {
 			continue
 		}
 
@@ -412,7 +445,7 @@ func (m *memWallet) fundTx(tx *wire.MsgTx, amt dcrutil.Amount, feeRate dcrutil.A
 		// output to the transaction reserved for change.
 		changeVal := amtSelected - amt - reqFee
 		if changeVal > 0 {
-			addr, err := m.newAddress()
+			addr, err := wallet.newAddress()
 			if err != nil {
 				return err
 			}
@@ -437,37 +470,61 @@ func (m *memWallet) fundTx(tx *wire.MsgTx, amt dcrutil.Amount, feeRate dcrutil.A
 
 // SendOutputs creates, then sends a transaction paying to the specified output
 // while observing the passed fee rate. The passed fee rate should be expressed
-// in atoms-per-byte.
-func (m *memWallet) SendOutputs(outputs []*wire.TxOut, feeRate dcrutil.Amount) (*chainhash.Hash, error) {
-	tx, err := m.CreateTransaction(outputs, feeRate)
+// in satoshis-per-byte.
+func (wallet *InMemoryWallet) SendOutputs(outputs []*wire.TxOut,
+	feeRate dcrutil.Amount) (*chainhash.Hash, error) {
+	args := &harness.CreateTransactionArgs{
+		Outputs: outputs,
+		FeeRate: feeRate,
+	}
+	tx, err := wallet.CreateTransaction(args)
 	if err != nil {
 		return nil, err
 	}
 
-	return m.rpc.SendRawTransaction(tx, true)
+	return wallet.nodeRPC.SendRawTransaction(tx, true)
+}
+
+// SendOutputsWithoutChange creates and sends a transaction that pays to the
+// specified outputs while observing the passed fee rate and ignoring a change
+// output. The passed fee rate should be expressed in sat/b.
+func (wallet *InMemoryWallet) SendOutputsWithoutChange(outputs []*wire.TxOut,
+	feeRate dcrutil.Amount) (*chainhash.Hash, error) {
+	args := &harness.CreateTransactionArgs{
+		Outputs: outputs,
+		FeeRate: feeRate,
+	}
+	tx, err := wallet.CreateTransaction(args)
+	if err != nil {
+		return nil, err
+	}
+
+	return wallet.nodeRPC.SendRawTransaction(tx, true)
 }
 
 // CreateTransaction returns a fully signed transaction paying to the specified
 // outputs while observing the desired fee rate. The passed fee rate should be
-// expressed in atoms-per-byte.
+// expressed in satoshis-per-byte. The transaction being created can optionally
+// include a change output indicated by the change boolean.
 //
 // This function is safe for concurrent access.
-func (m *memWallet) CreateTransaction(outputs []*wire.TxOut, feeRate dcrutil.Amount) (*wire.MsgTx, error) {
-	m.Lock()
-	defer m.Unlock()
+func (wallet *InMemoryWallet) CreateTransaction(args *harness.CreateTransactionArgs) (*wire.MsgTx, error) {
+
+	wallet.Lock()
+	defer wallet.Unlock()
 
 	tx := wire.NewMsgTx()
 
 	// Tally up the total amount to be sent in order to perform coin
 	// selection shortly below.
 	var outputAmt dcrutil.Amount
-	for _, output := range outputs {
+	for _, output := range args.Outputs {
 		outputAmt += dcrutil.Amount(output.Value)
 		tx.AddTxOut(output)
 	}
 
 	// Attempt to fund the transaction with spendable utxos.
-	if err := m.fundTx(tx, outputAmt, feeRate); err != nil {
+	if err := wallet.fundTx(tx, outputAmt, args.FeeRate); err != nil {
 		return nil, err
 	}
 
@@ -477,9 +534,9 @@ func (m *memWallet) CreateTransaction(outputs []*wire.TxOut, feeRate dcrutil.Amo
 	spentOutputs := make([]*utxo, 0, len(tx.TxIn))
 	for i, txIn := range tx.TxIn {
 		outPoint := txIn.PreviousOutPoint
-		utxo := m.utxos[outPoint]
+		utxo := wallet.utxos[outPoint]
 
-		extendedKey, err := m.hdRoot.Child(utxo.keyIndex)
+		extendedKey, err := wallet.hdRoot.Child(utxo.keyIndex)
 		if err != nil {
 			return nil, err
 		}
@@ -515,12 +572,12 @@ func (m *memWallet) CreateTransaction(outputs []*wire.TxOut, feeRate dcrutil.Amo
 // being selected to fund a transaction via the CreateTransaction method.
 //
 // This function is safe for concurrent access.
-func (m *memWallet) UnlockOutputs(inputs []*wire.TxIn) {
-	m.Lock()
-	defer m.Unlock()
+func (wallet *InMemoryWallet) UnlockOutputs(inputs []*wire.TxIn) {
+	wallet.Lock()
+	defer wallet.Unlock()
 
 	for _, input := range inputs {
-		utxo, ok := m.utxos[input.PreviousOutPoint]
+		utxo, ok := wallet.utxos[input.PreviousOutPoint]
 		if !ok {
 			continue
 		}
@@ -532,15 +589,15 @@ func (m *memWallet) UnlockOutputs(inputs []*wire.TxIn) {
 // ConfirmedBalance returns the confirmed balance of the wallet.
 //
 // This function is safe for concurrent access.
-func (m *memWallet) ConfirmedBalance() dcrutil.Amount {
-	m.RLock()
-	defer m.RUnlock()
+func (wallet *InMemoryWallet) ConfirmedBalance() dcrutil.Amount {
+	wallet.RLock()
+	defer wallet.RUnlock()
 
 	var balance dcrutil.Amount
-	for _, utxo := range m.utxos {
+	for _, utxo := range wallet.utxos {
 		// Prevent any immature or locked outputs from contributing to
 		// the wallet's total confirmed balance.
-		if !utxo.isMature(m.currentHeight) || utxo.isLocked {
+		if !utxo.isMature(wallet.currentHeight) || utxo.isLocked {
 			continue
 		}
 
@@ -548,15 +605,4 @@ func (m *memWallet) ConfirmedBalance() dcrutil.Amount {
 	}
 
 	return balance
-}
-
-// keyToAddr maps the passed private to corresponding p2pkh address.
-func keyToAddr(key *secp256k1.PrivateKey, net *chaincfg.Params) (dcrutil.Address, error) {
-	pubKey := (*secp256k1.PublicKey)(&key.PublicKey)
-	serializedKey := pubKey.SerializeCompressed()
-	pubKeyAddr, err := dcrutil.NewAddressSecpPubKey(serializedKey, net)
-	if err != nil {
-		return nil, err
-	}
-	return pubKeyAddr.AddressPubKeyHash(), nil
 }
