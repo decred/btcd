@@ -599,7 +599,9 @@ type AddrIndex struct {
 	// be changed afterwards, so there is no need to protect them with a
 	// separate mutex.
 	db          database.DB
+	chain       ChainQueryer
 	chainParams *chaincfg.Params
+	sub         *IndexSubscription
 
 	// The following fields are used to quickly link transactions and
 	// addresses that have not been included into a block yet when an
@@ -617,6 +619,9 @@ type AddrIndex struct {
 	unconfirmedLock sync.RWMutex
 	txnsByAddr      map[[addrKeySize]byte]map[chainhash.Hash]*dcrutil.Tx
 	addrsByTx       map[chainhash.Hash]map[[addrKeySize]byte]struct{}
+
+	subscribers map[chan bool]struct{}
+	mtx         sync.Mutex
 }
 
 // Ensure the AddrIndex type implements the Indexer interface.
@@ -633,12 +638,41 @@ func (idx *AddrIndex) NeedsInputs() bool {
 	return true
 }
 
-// Init is only provided to satisfy the Indexer interface as there is nothing to
-// initialize for this index.
+// Init creates a transaction by address index.  In particular, it maintains
+// a map of transactions and their associated addresses via a stream of updates
+// on connected and disconnected blocks.
 //
 // This is part of the Indexer interface.
-func (idx *AddrIndex) Init() error {
-	// Nothing to do.
+func (idx *AddrIndex) Init(ctx context.Context, chainParams *chaincfg.Params) error {
+	if interruptRequested(ctx) {
+		return errInterruptRequested
+	}
+
+	// Finish any drops that were previously interrupted.
+	if err := finishDrop(ctx, idx.db, idx); err != nil {
+		return err
+	}
+
+	// Create the initial state for the index as needed.
+	if err := createIndex(idx.db, &chainParams.GenesisHash, idx); err != nil {
+		return err
+	}
+
+	// Upgrade the index as needed.
+	if err := upgradeIndex(ctx, idx.db, &chainParams.GenesisHash, idx); err != nil {
+		return err
+	}
+
+	// Recover the index to the main chain if needed.
+	if err := recover(ctx, idx.db, idx, idx.chain); err != nil {
+		return err
+	}
+
+	// Sync the index to the main chain tip.
+	if err := catchUp(ctx, idx.db, idx, idx.chain); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -663,9 +697,22 @@ func (idx *AddrIndex) Version() uint32 {
 	return addrIndexVersion
 }
 
-// Create is invoked when the indexer manager determines the index needs
-// to be created for the first time.  It creates the bucket for the address
-// index.
+// DB returns the database of the index.
+//
+// This is part of the Indexer interface.
+func (idx *AddrIndex) DB() database.DB {
+	return idx.db
+}
+
+// Tip returns the current tip of the index.
+//
+// This is part of the Indexer interface.
+func (idx *AddrIndex) Tip() (int64, *chainhash.Hash, error) {
+	return tip(idx.db, idx.Key())
+}
+
+// Create is invoked when the index is created for the first time.  It creates
+// the bucket for the address index.
 //
 // This is part of the Indexer interface.
 func (idx *AddrIndex) Create(dbTx database.Tx) error {
@@ -793,12 +840,9 @@ func (idx *AddrIndex) indexBlock(data writeIndexData, block *dcrutil.Block, prev
 	}
 }
 
-// ConnectBlock is invoked by the index manager when a new block has been
-// connected to the main chain.  This indexer adds a mapping for each address
-// the transactions in the block involve.
-//
-// This is part of the Indexer interface.
-func (idx *AddrIndex) ConnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, prevScripts PrevScripter) error {
+// connectBlock adds a mapping for all addresses associated with transactions in
+// the provided block.
+func (idx *AddrIndex) connectBlock(dbTx database.Tx, block, parent *dcrutil.Block, prevScripts PrevScripter) error {
 	// NOTE: The fact that the block can disapprove the regular tree of the
 	// previous block is ignored for this index because even though the
 	// disapproved transactions no longer apply spend semantics, they still
@@ -843,15 +887,13 @@ func (idx *AddrIndex) ConnectBlock(dbTx database.Tx, block, parent *dcrutil.Bloc
 		}
 	}
 
-	return nil
+	// Update the current index tip.
+	return dbPutIndexerTip(dbTx, idx.Key(), block.Hash(), int32(block.Height()))
 }
 
-// DisconnectBlock is invoked by the index manager when a block has been
-// disconnected from the main chain.  This indexer removes the address mappings
-// each transaction in the block involve.
-//
-// This is part of the Indexer interface.
-func (idx *AddrIndex) DisconnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, prevScripts PrevScripter) error {
+// disconnectBlock removes the mappings for addresses associated with
+// transactions in the provided block.
+func (idx *AddrIndex) disconnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, prevScripts PrevScripter) error {
 	// NOTE: The fact that the block can disapprove the regular tree of the
 	// previous block is ignored for this index because even though the
 	// disapproved transactions no longer apply spend semantics, they still
@@ -871,7 +913,9 @@ func (idx *AddrIndex) DisconnectBlock(dbTx database.Tx, block, parent *dcrutil.B
 		}
 	}
 
-	return nil
+	// Update the current index tip.
+	return dbPutIndexerTip(dbTx, idx.Key(), &block.MsgBlock().Header.PrevBlock,
+		int32(block.Height()-1))
 }
 
 // EntriesForAddress returns a slice of details which identify each transaction,
@@ -1056,17 +1100,31 @@ func (idx *AddrIndex) UnconfirmedTxnsForAddress(addr dcrutil.Address) []*dcrutil
 // NewAddrIndex returns a new instance of an indexer that is used to create a
 // mapping of all addresses in the blockchain to the respective transactions
 // that involve them.
-//
-// It implements the Indexer interface which plugs into the IndexManager that in
-// turn is used by the blockchain package.  This allows the index to be
-// seamlessly maintained along with the chain.
-func NewAddrIndex(db database.DB, chainParams *chaincfg.Params) *AddrIndex {
-	return &AddrIndex{
+func NewAddrIndex(ctx context.Context, db database.DB, chain ChainQueryer, chainParams *chaincfg.Params, subscriber *IndexSubscriber) (*AddrIndex, error) {
+	idx := &AddrIndex{
 		db:          db,
+		chain:       chain,
 		chainParams: chainParams,
+		subscribers: make(map[chan bool]struct{}),
 		txnsByAddr:  make(map[[addrKeySize]byte]map[chainhash.Hash]*dcrutil.Tx),
 		addrsByTx:   make(map[chainhash.Hash]map[[addrKeySize]byte]struct{}),
 	}
+
+	err := idx.Init(ctx, chainParams)
+	if err != nil {
+		return nil, err
+	}
+
+	// The address index is an optional index. It depends on the
+	// transaction index and is updated asynchronously.
+	idx.sub, err = subscriber.Subscribe(idx, txIndexName)
+	if err != nil {
+		return nil, err
+	}
+
+	go idx.Run(ctx)
+
+	return idx, nil
 }
 
 // DropAddrIndex drops the address index from the provided database if it
@@ -1078,4 +1136,87 @@ func DropAddrIndex(ctx context.Context, db database.DB) error {
 // DropIndex drops the address index from the provided database if it exists.
 func (*AddrIndex) DropIndex(ctx context.Context, db database.DB) error {
 	return DropAddrIndex(ctx, db)
+}
+
+// ProcessNotification indexes the provided notification based on its
+// notification type.
+//
+// This is part of the Indexer interface.
+func (idx *AddrIndex) ProcessNotification(dbTx database.Tx, ntfn *IndexNtfn) error {
+	switch ntfn.NtfnType {
+	case ConnectNtfn:
+		err := idx.connectBlock(dbTx, ntfn.Block, ntfn.Parent, ntfn.PrevScripts)
+		if err != nil {
+			return fmt.Errorf("%s: unable to connect block: %v", idx.Name(), err)
+		}
+
+	case DisconnectNtfn:
+		err := idx.disconnectBlock(dbTx, ntfn.Block, ntfn.Parent, ntfn.PrevScripts)
+		if err != nil {
+			log.Errorf("%s: unable to disconnect block: %v", idx.Name(), err)
+		}
+
+	default:
+		return fmt.Errorf("unknown notification type provided: %d", ntfn.NtfnType)
+	}
+
+	return nil
+}
+
+// Run processes incoming notifications from the index subscriber.
+//
+// This should be run as a goroutine.
+func (idx *AddrIndex) Run(ctx context.Context) {
+	c := idx.sub.C()
+
+	for {
+		select {
+		case ntfn := <-c:
+			err := idx.db.Update(func(dbTx database.Tx) error {
+				return idx.ProcessNotification(dbTx, ntfn)
+			})
+			if err != nil {
+				log.Error(err)
+			}
+
+			// Notify the dependent subscription if set.
+			idx.sub.mtx.Lock()
+			if idx.sub.dependency != nil {
+				idx.sub.dependency.publishIndexNtfn(ntfn)
+			}
+			idx.sub.mtx.Unlock()
+
+			bestHeight, bestHash := idx.chain.Best()
+			tipHeight, tipHash, err := idx.Tip()
+			if err != nil {
+				log.Error(err)
+				continue
+			}
+
+			if tipHeight == bestHeight && bestHash.IsEqual(tipHash) {
+				// Notify subscribers the index is synced by
+				// closing the channel.
+				idx.mtx.Lock()
+				for c := range idx.subscribers {
+					close(c)
+					delete(idx.subscribers, c)
+				}
+				idx.mtx.Unlock()
+			}
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// WaitForSync subscribes clients for the next index sync update.
+func (idx *AddrIndex) WaitForSync() chan bool {
+	c := make(chan bool)
+
+	idx.mtx.Lock()
+	idx.subscribers[c] = struct{}{}
+	idx.mtx.Unlock()
+
+	return c
 }

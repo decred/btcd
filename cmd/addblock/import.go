@@ -50,6 +50,10 @@ type blockImporter struct {
 	lastBlockTime     time.Time
 	lastLogTime       time.Time
 	startTime         time.Time
+
+	txIndex         *indexers.TxIndex
+	addrIndex       *indexers.AddrIndex
+	existsAddrIndex *indexers.ExistsAddrIndex
 }
 
 // readBlock reads the next block from the input file.
@@ -301,13 +305,24 @@ func (bi *blockImporter) Import() chan *importResults {
 // newBlockImporter returns a new importer for the provided file reader seeker
 // and database.
 func newBlockImporter(db database.DB, r io.ReadSeeker) (*blockImporter, error) {
+	ctx := context.Background()
+	subber := indexers.NewIndexSubscriber(ctx)
+	chain, err := blockchain.New(context.Background(),
+		&blockchain.Config{
+			DB:              db,
+			ChainParams:     activeNetParams,
+			Checkpoints:     activeNetParams.Checkpoints,
+			TimeSource:      blockchain.NewMedianTime(),
+			IndexSubscriber: subber,
+		})
+	if err != nil {
+		return nil, err
+	}
+
 	// Create the various indexes as needed.
-	//
-	// CAUTION: the txindex needs to be first in the indexes array because
-	// the addrindex uses data from the txindex during catchup.  If the
-	// addrindex is run first, it may not have the transactions from the
-	// current block indexed.
-	var indexes []indexers.Indexer
+	var txIndex *indexers.TxIndex
+	var addrIndex *indexers.AddrIndex
+	var existsAddrIndex *indexers.ExistsAddrIndex
 	if cfg.TxIndex || cfg.AddrIndex {
 		// Enable transaction index if address index is enabled since it
 		// requires it.
@@ -318,45 +333,42 @@ func newBlockImporter(db database.DB, r io.ReadSeeker) (*blockImporter, error) {
 		} else {
 			log.Info("Transaction index is enabled")
 		}
-		indexes = append(indexes, indexers.NewTxIndex(db))
+
+		txIndex, err = indexers.NewTxIndex(ctx, db, chain, activeNetParams,
+			subber)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if cfg.AddrIndex {
 		log.Info("Address index is enabled")
-		indexes = append(indexes, indexers.NewAddrIndex(db, activeNetParams))
+		addrIndex, err = indexers.NewAddrIndex(ctx, db, chain, activeNetParams,
+			subber)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if !cfg.NoExistsAddrIndex {
 		log.Info("Exists address index is enabled")
-		indexes = append(indexes, indexers.NewExistsAddrIndex(db,
-			activeNetParams))
-	}
-
-	// Create an index manager if any of the optional indexes are enabled.
-	var indexManager indexers.IndexManager
-	if len(indexes) > 0 {
-		indexManager = indexers.NewManager(db, indexes, activeNetParams)
-	}
-
-	chain, err := blockchain.New(context.Background(),
-		&blockchain.Config{
-			DB:           db,
-			ChainParams:  activeNetParams,
-			Checkpoints:  activeNetParams.Checkpoints,
-			TimeSource:   blockchain.NewMedianTime(),
-			IndexManager: indexManager,
-		})
-	if err != nil {
-		return nil, err
+		existsAddrIndex, err = indexers.NewExistsAddrIndex(ctx, db, chain,
+			activeNetParams, subber)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &blockImporter{
-		db:           db,
-		r:            r,
-		processQueue: make(chan []byte, 2),
-		doneChan:     make(chan bool),
-		errChan:      make(chan error),
-		quit:         make(chan struct{}),
-		chain:        chain,
-		lastLogTime:  time.Now(),
-		startTime:    time.Now(),
+		db:              db,
+		r:               r,
+		processQueue:    make(chan []byte, 2),
+		doneChan:        make(chan bool),
+		errChan:         make(chan error),
+		quit:            make(chan struct{}),
+		chain:           chain,
+		lastLogTime:     time.Now(),
+		startTime:       time.Now(),
+		txIndex:         txIndex,
+		addrIndex:       addrIndex,
+		existsAddrIndex: existsAddrIndex,
 	}, nil
 }

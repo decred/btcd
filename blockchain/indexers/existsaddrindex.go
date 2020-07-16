@@ -6,9 +6,11 @@ package indexers
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/decred/dcrd/blockchain/stake/v3"
+	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/chaincfg/v3"
 	"github.com/decred/dcrd/database/v2"
 	"github.com/decred/dcrd/dcrutil/v3"
@@ -46,7 +48,9 @@ type ExistsAddrIndex struct {
 	// be changed afterwards, so there is no need to protect them with a
 	// separate mutex.
 	db          database.DB
+	chain       ChainQueryer
 	chainParams *chaincfg.Params
+	sub         *IndexSubscription
 
 	// The following fields are used to quickly link transactions and
 	// addresses that have not been included into a block yet when an
@@ -63,31 +67,76 @@ type ExistsAddrIndex struct {
 	// once they are included into a block.
 	unconfirmedLock sync.RWMutex
 	mpExistsAddr    map[[addrKeySize]byte]struct{}
+
+	subscribers map[chan bool]struct{}
+	mtx         sync.Mutex
 }
 
 // NewExistsAddrIndex returns a new instance of an indexer that is used to
 // create a mapping of all addresses ever seen.
-//
-// It implements the Indexer interface which plugs into the IndexManager that in
-// turn is used by the blockchain package.  This allows the index to be
-// seamlessly maintained along with the chain.
-func NewExistsAddrIndex(db database.DB, chainParams *chaincfg.Params) *ExistsAddrIndex {
-	return &ExistsAddrIndex{
+func NewExistsAddrIndex(ctx context.Context, db database.DB, chain ChainQueryer, chainParams *chaincfg.Params, subscriber *IndexSubscriber) (*ExistsAddrIndex, error) {
+	idx := &ExistsAddrIndex{
 		db:           db,
+		chain:        chain,
 		chainParams:  chainParams,
 		mpExistsAddr: make(map[[addrKeySize]byte]struct{}),
+		subscribers:  make(map[chan bool]struct{}),
 	}
+
+	err := idx.Init(ctx, chainParams)
+	if err != nil {
+		return nil, err
+	}
+
+	// The exists address index is an optional index. It has no dependencies
+	// and is updated asynchronously.
+	idx.sub, err = subscriber.Subscribe(idx, "")
+	if err != nil {
+		return nil, err
+	}
+
+	go idx.Run(ctx)
+
+	return idx, nil
 }
 
 // Ensure the ExistsAddrIndex type implements the Indexer interface.
 var _ Indexer = (*ExistsAddrIndex)(nil)
 
-// Init is only provided to satisfy the Indexer interface as there is nothing to
-// initialize for this index.
+// Init initializes the exists address transaction index.  In particular, it
+// records all addresses seen by the client.
 //
 // This is part of the Indexer interface.
-func (idx *ExistsAddrIndex) Init() error {
-	// Nothing to do.
+func (idx *ExistsAddrIndex) Init(ctx context.Context, chainParams *chaincfg.Params) error {
+	if interruptRequested(ctx) {
+		return errInterruptRequested
+	}
+
+	// Finish any drops that were previously interrupted.
+	if err := finishDrop(ctx, idx.db, idx); err != nil {
+		return err
+	}
+
+	// Create the initial state for the index as needed.
+	if err := createIndex(idx.db, &chainParams.GenesisHash, idx); err != nil {
+		return err
+	}
+
+	// Upgrade the index as needed.
+	if err := upgradeIndex(ctx, idx.db, &chainParams.GenesisHash, idx); err != nil {
+		return err
+	}
+
+	// Recover the index to the main chain if needed.
+	if err := recover(ctx, idx.db, idx, idx.chain); err != nil {
+		return err
+	}
+
+	// Sync the index to the main chain tip.
+	if err := catchUp(ctx, idx.db, idx, idx.chain); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -112,9 +161,22 @@ func (idx *ExistsAddrIndex) Version() uint32 {
 	return existsAddrIndexVersion
 }
 
-// Create is invoked when the indexer manager determines the index needs
-// to be created for the first time.  It creates the bucket for the address
-// index.
+// DB returns the database of the index.
+//
+// This is part of the Indexer interface.
+func (idx *ExistsAddrIndex) DB() database.DB {
+	return idx.db
+}
+
+// Tip returns the current tip of the index.
+//
+// This is part of the Indexer interface.
+func (idx *ExistsAddrIndex) Tip() (int64, *chainhash.Hash, error) {
+	return tip(idx.db, idx.Key())
+}
+
+// Create is invoked when the index is created for the first time.  It creates
+// the bucket for the address index.
 //
 // This is part of the Indexer interface.
 func (idx *ExistsAddrIndex) Create(dbTx database.Tx) error {
@@ -210,12 +272,11 @@ func (idx *ExistsAddrIndex) ExistsAddresses(addrs []dcrutil.Address) ([]bool, er
 	return exists, nil
 }
 
-// ConnectBlock is invoked by the index manager when a new block has been
-// connected to the main chain.  This indexer adds a key for each address
-// the transactions in the block involve.
+// connectBlock adds all addresses associated with transactions in the
+// provided block.
 //
 // This is part of the Indexer interface.
-func (idx *ExistsAddrIndex) ConnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, _ PrevScripter) error {
+func (idx *ExistsAddrIndex) connectBlock(dbTx database.Tx, block, parent *dcrutil.Block, _ PrevScripter) error {
 	// NOTE: The fact that the block can disapprove the regular tree of the
 	// previous block is ignored for this index because even though technically
 	// the address might become unused again if its only use was in a
@@ -324,15 +385,15 @@ func (idx *ExistsAddrIndex) ConnectBlock(dbTx database.Tx, block, parent *dcruti
 		}
 	}
 
-	return nil
+	// Update the current index tip.
+	return dbPutIndexerTip(dbTx, idx.Key(), block.Hash(), int32(block.Height()))
 }
 
-// DisconnectBlock is invoked by the index manager when a block has been
-// disconnected from the main chain. Note that the exists address manager
-// never removes addresses.
+// disconnectBlock only updates the index tip because the index never removes
+// addresses, even in the case of a reorg.
 //
 // This is part of the Indexer interface.
-func (idx *ExistsAddrIndex) DisconnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, _ PrevScripter) error {
+func (idx *ExistsAddrIndex) disconnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, _ PrevScripter) error {
 	// The primary purpose of this index is to track whether or not addresses
 	// have ever been seen, so even if they ultimately end up technically
 	// becoming unused due to being in a block that was disconnected and the
@@ -345,7 +406,10 @@ func (idx *ExistsAddrIndex) DisconnectBlock(dbTx database.Tx, block, parent *dcr
 	// case and the huge performance gained from not having to constantly update
 	// the index with usage counts that would be required to properly handle
 	// disconnecting block and disapproved regular trees.
-	return nil
+
+	// Update the current index tip.
+	return dbPutIndexerTip(dbTx, idx.Key(), &block.MsgBlock().Header.PrevBlock,
+		int32(block.Height()-1))
 }
 
 // addUnconfirmedTx adds all addresses related to the transaction to the
@@ -439,4 +503,87 @@ func DropExistsAddrIndex(ctx context.Context, db database.DB) error {
 // exists.
 func (*ExistsAddrIndex) DropIndex(ctx context.Context, db database.DB) error {
 	return DropExistsAddrIndex(ctx, db)
+}
+
+// ProcessNotification indexes the provided notification based on its
+// notification type.
+//
+// This is part of the Indexer interface.
+func (idx *ExistsAddrIndex) ProcessNotification(dbTx database.Tx, ntfn *IndexNtfn) error {
+	switch ntfn.NtfnType {
+	case ConnectNtfn:
+		err := idx.connectBlock(dbTx, ntfn.Block, ntfn.Parent, ntfn.PrevScripts)
+		if err != nil {
+			return fmt.Errorf("%s: unable to connect block: %v", idx.Name(), err)
+		}
+
+	case DisconnectNtfn:
+		err := idx.disconnectBlock(dbTx, ntfn.Block, ntfn.Parent, ntfn.PrevScripts)
+		if err != nil {
+			log.Errorf("%s: unable to disconnect block: %v", idx.Name(), err)
+		}
+
+	default:
+		return fmt.Errorf("unknown notification type provided: %d", ntfn.NtfnType)
+	}
+
+	return nil
+}
+
+// Run processes incoming notifications from the index subscriber.
+//
+// This should be run as a goroutine.
+func (idx *ExistsAddrIndex) Run(ctx context.Context) {
+	c := idx.sub.C()
+
+	for {
+		select {
+		case ntfn := <-c:
+			err := idx.db.Update(func(dbTx database.Tx) error {
+				return idx.ProcessNotification(dbTx, ntfn)
+			})
+			if err != nil {
+				log.Error(err)
+			}
+
+			// Notify the dependent subscription if set.
+			idx.sub.mtx.Lock()
+			if idx.sub.dependency != nil {
+				idx.sub.dependency.publishIndexNtfn(ntfn)
+			}
+			idx.sub.mtx.Unlock()
+
+			bestHeight, bestHash := idx.chain.Best()
+			tipHeight, tipHash, err := idx.Tip()
+			if err != nil {
+				log.Error(err)
+				continue
+			}
+
+			if tipHeight == bestHeight && bestHash.IsEqual(tipHash) {
+				// Notify subscribers the index is synced by
+				// closing the channel.
+				idx.mtx.Lock()
+				for c := range idx.subscribers {
+					close(c)
+					delete(idx.subscribers, c)
+				}
+				idx.mtx.Unlock()
+			}
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// WaitForSync subscribes clients for the next index sync update.
+func (idx *ExistsAddrIndex) WaitForSync() chan bool {
+	c := make(chan bool)
+
+	idx.mtx.Lock()
+	idx.subscribers[c] = struct{}{}
+	idx.mtx.Unlock()
+
+	return c
 }

@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/chaincfg/v3"
@@ -105,16 +106,50 @@ func dbDeleteFilterHeader(dbTx database.Tx, key []byte, h *chainhash.Hash) error
 // CFIndex implements a committed filter (cf) by hash index.
 type CFIndex struct {
 	db          database.DB
+	chain       ChainQueryer
 	chainParams *chaincfg.Params
+	sub         *IndexSubscription
+	subscribers map[chan bool]struct{}
+	mtx         sync.Mutex
 }
 
 // Ensure the CFIndex type implements the Indexer interface.
 var _ Indexer = (*CFIndex)(nil)
 
-// Init initializes the hash-based cf index. This is part of the Indexer
-// interface.
-func (idx *CFIndex) Init() error {
-	return nil // Nothing to do.
+// Init initializes the hash-based cf index.
+//
+// This is part of the Indexer interface.
+func (idx *CFIndex) Init(ctx context.Context, chainParams *chaincfg.Params) error {
+	if interruptRequested(ctx) {
+		return errInterruptRequested
+	}
+
+	// Finish any drops that were previously interrupted.
+	if err := finishDrop(ctx, idx.db, idx); err != nil {
+		return err
+	}
+
+	// Create the initial state for the index as needed.
+	if err := createIndex(idx.db, &chainParams.GenesisHash, idx); err != nil {
+		return err
+	}
+
+	// Upgrade the index as needed.
+	if err := upgradeIndex(ctx, idx.db, &chainParams.GenesisHash, idx); err != nil {
+		return err
+	}
+
+	// Recover the index to the main chain if needed.
+	if err := recover(ctx, idx.db, idx, idx.chain); err != nil {
+		return err
+	}
+
+	// Sync the index to the main chain tip.
+	if err := catchUp(ctx, idx.db, idx, idx.chain); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Key returns the database key to use for the index as a byte slice. This is
@@ -134,6 +169,20 @@ func (idx *CFIndex) Name() string {
 // This is part of the Indexer interface.
 func (idx *CFIndex) Version() uint32 {
 	return cfIndexVersion
+}
+
+// DB returns the database of the index.
+//
+// This is part of the Indexer interface.
+func (idx *CFIndex) DB() database.DB {
+	return idx.db
+}
+
+// Tip returns the current tip of the index.
+//
+// This is part of the Indexer interface.
+func (idx *CFIndex) Tip() (int64, *chainhash.Hash, error) {
+	return tip(idx.db, idx.Key())
 }
 
 // Create is invoked when the indexer manager determines the index needs to
@@ -210,10 +259,8 @@ func storeFilter(dbTx database.Tx, block *dcrutil.Block, f *gcs.FilterV1, filter
 	return dbStoreFilterHeader(dbTx, hkey, h, fh[:])
 }
 
-// ConnectBlock is invoked by the index manager when a new block has been
-// connected to the main chain. This indexer adds a hash-to-cf mapping for
-// every passed block. This is part of the Indexer interface.
-func (idx *CFIndex) ConnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, _ PrevScripter) error {
+// connectBlock adds a hash-to-cf mapping for the passed block.
+func (idx *CFIndex) connectBlock(dbTx database.Tx, block, parent *dcrutil.Block, _ PrevScripter) error {
 	f, err := blockcf.Regular(block.MsgBlock())
 	if err != nil {
 		return err
@@ -229,13 +276,17 @@ func (idx *CFIndex) ConnectBlock(dbTx database.Tx, block, parent *dcrutil.Block,
 		return err
 	}
 
-	return storeFilter(dbTx, block, f, wire.GCSFilterExtended)
+	err = storeFilter(dbTx, block, f, wire.GCSFilterExtended)
+	if err != nil {
+		return err
+	}
+
+	// Update the current index tip.
+	return dbPutIndexerTip(dbTx, idx.Key(), block.Hash(), int32(block.Height()))
 }
 
-// DisconnectBlock is invoked by the index manager when a block has been
-// disconnected from the main chain.  This indexer removes the hash-to-cf
-// mapping for every passed block. This is part of the Indexer interface.
-func (idx *CFIndex) DisconnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, _ PrevScripter) error {
+// disconnectBlock removes the hash-to-cf mapping for the passed block.
+func (idx *CFIndex) disconnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, _ PrevScripter) error {
 	for _, key := range cfIndexKeys {
 		err := dbDeleteFilter(dbTx, key, block.Hash())
 		if err != nil {
@@ -250,7 +301,9 @@ func (idx *CFIndex) DisconnectBlock(dbTx database.Tx, block, parent *dcrutil.Blo
 		}
 	}
 
-	return nil
+	// Update the current index tip.
+	return dbPutIndexerTip(dbTx, idx.Key(), &block.MsgBlock().Header.PrevBlock,
+		int32(block.Height()-1))
 }
 
 // FilterByBlockHash returns the serialized contents of a block's basic or
@@ -292,11 +345,120 @@ func (idx *CFIndex) FilterHeaderByBlockHash(h *chainhash.Hash, filterType wire.F
 // It implements the Indexer interface which plugs into the IndexManager that
 // in turn is used by the blockchain package. This allows the index to be
 // seamlessly maintained along with the chain.
-func NewCfIndex(db database.DB, chainParams *chaincfg.Params) *CFIndex {
-	return &CFIndex{db: db, chainParams: chainParams}
+func NewCfIndex(ctx context.Context, db database.DB, chain ChainQueryer, chainParams *chaincfg.Params, subscriber *IndexSubscriber) (*CFIndex, error) {
+	idx := &CFIndex{
+		db:          db,
+		chain:       chain,
+		chainParams: chainParams,
+		subscribers: make(map[chan bool]struct{}),
+	}
+	err := idx.Init(ctx, chainParams)
+	if err != nil {
+		return nil, err
+	}
+
+	// The committed filter index is an optional index. It has no dependencies and
+	// is updated asynchronously.
+	idx.sub, err = subscriber.Subscribe(idx, "")
+	if err != nil {
+		return nil, err
+	}
+
+	go idx.run(ctx)
+
+	return idx, nil
 }
 
 // DropCfIndex drops the CF index from the provided database if exists.
 func DropCfIndex(ctx context.Context, db database.DB) error {
 	return dropIndexMetadata(db, cfIndexParentBucketKey, cfIndexName)
+}
+
+// DropIndex drops the cf index from the provided database if it
+// exists.
+func (*CFIndex) DropIndex(ctx context.Context, db database.DB) error {
+	return DropTxIndex(ctx, db)
+}
+
+// ProcessNotification indexes the provided notification based on its
+// notification type.
+//
+// This is part of the Indexer interface.
+func (idx *CFIndex) ProcessNotification(dbTx database.Tx, ntfn *IndexNtfn) error {
+	switch ntfn.NtfnType {
+	case ConnectNtfn:
+		err := idx.connectBlock(dbTx, ntfn.Block, ntfn.Parent, ntfn.PrevScripts)
+		if err != nil {
+			return fmt.Errorf("%s: unable to connect block: %v", idx.Name(), err)
+		}
+
+	case DisconnectNtfn:
+		err := idx.disconnectBlock(dbTx, ntfn.Block, ntfn.Parent, ntfn.PrevScripts)
+		if err != nil {
+			log.Errorf("%s: unable to disconnect block: %v", idx.Name(), err)
+		}
+
+	default:
+		return fmt.Errorf("unknown notification type provided: %d", ntfn.NtfnType)
+	}
+
+	return nil
+}
+
+// run processes incoming notifications from the index subscriber.
+//
+// This should be run as a goroutine.
+func (idx *CFIndex) run(ctx context.Context) {
+	c := idx.sub.C()
+
+	for {
+		select {
+		case ntfn := <-c:
+			err := idx.db.Update(func(dbTx database.Tx) error {
+				return idx.ProcessNotification(dbTx, ntfn)
+			})
+			if err != nil {
+				log.Error(err)
+			}
+
+			// Notify the dependent subscription if set.
+			idx.sub.mtx.Lock()
+			if idx.sub.dependency != nil {
+				idx.sub.dependency.publishIndexNtfn(ntfn)
+			}
+			idx.sub.mtx.Unlock()
+
+			bestHeight, bestHash := idx.chain.Best()
+			tipHeight, tipHash, err := idx.Tip()
+			if err != nil {
+				log.Error(err)
+				continue
+			}
+
+			if tipHeight == bestHeight && bestHash.IsEqual(tipHash) {
+				// Notify subscribers the index is synced by
+				// closing the channel.
+				idx.mtx.Lock()
+				for c := range idx.subscribers {
+					close(c)
+					delete(idx.subscribers, c)
+				}
+				idx.mtx.Unlock()
+			}
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// WaitForSync subscribes clients for the next index sync update.
+func (idx *CFIndex) WaitForSync() chan bool {
+	c := make(chan bool)
+
+	idx.mtx.Lock()
+	idx.subscribers[c] = struct{}{}
+	idx.mtx.Unlock()
+
+	return c
 }

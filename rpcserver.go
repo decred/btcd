@@ -95,6 +95,10 @@ const (
 	// sstxCommitmentString is the string to insert when a verbose
 	// transaction output's pkscript type is a ticket commitment.
 	sstxCommitmentString = "sstxcommitment"
+
+	// syncWait is the maximum time in seconds to wait for an index
+	// to sync with the main chain.
+	syncWait = time.Second * 3
 )
 
 var (
@@ -1422,6 +1426,25 @@ func handleExistsAddress(_ context.Context, s *rpcServer, cmd interface{}) (inte
 			err)
 	}
 
+	// Ensure the exists address index is synced.
+	tHeight, tHash, err := existsAddrIndex.Tip()
+	if err != nil {
+		return nil, rpcInternalError(err.Error(), "")
+	}
+
+	chain := s.cfg.Chain
+	if chain.BestSnapshot().Height > (tHeight + 5) {
+		return nil, fmt.Errorf("%s: index not synced", existsAddrIndex.Name())
+	}
+
+	for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+		select {
+		case <-time.After(syncWait):
+			return nil, fmt.Errorf("%s: index not synced", existsAddrIndex.Name())
+		case <-existsAddrIndex.WaitForSync():
+		}
+	}
+
 	exists, err := existsAddrIndex.ExistsAddress(addr)
 	if err != nil {
 		return nil, rpcInvalidError("Could not query address: %v", err)
@@ -1448,6 +1471,25 @@ func handleExistsAddresses(_ context.Context, s *rpcServer, cmd interface{}) (in
 			return nil, rpcAddressKeyError("Could not decode address: %v", err)
 		}
 		addresses[i] = addr
+	}
+
+	// Ensure the exists address index is synced.
+	tHeight, tHash, err := existsAddrIndex.Tip()
+	if err != nil {
+		return nil, rpcInternalError(err.Error(), "")
+	}
+
+	chain := s.cfg.Chain
+	if chain.BestSnapshot().Height > (tHeight + 5) {
+		return nil, fmt.Errorf("%s: index not synced", existsAddrIndex.Name())
+	}
+
+	for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+		select {
+		case <-time.After(syncWait):
+			return nil, fmt.Errorf("%s: index not synced", existsAddrIndex.Name())
+		case <-existsAddrIndex.WaitForSync():
+		}
 	}
 
 	exists, err := existsAddrIndex.ExistsAddresses(addresses)
@@ -2197,6 +2239,25 @@ func handleGetCFilter(_ context.Context, s *rpcServer, cmd interface{}) (interfa
 		return nil, rpcInvalidError("Unknown filter type %q", c.FilterType)
 	}
 
+	// Ensure the committed filter index is synced.
+	tHeight, tHash, err := cfIndex.Tip()
+	if err != nil {
+		return nil, rpcInternalError(err.Error(), "")
+	}
+
+	chain := s.cfg.Chain
+	if chain.BestSnapshot().Height > (tHeight + 5) {
+		return nil, fmt.Errorf("%s: index not synced", cfIndex.Name())
+	}
+
+	for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+		select {
+		case <-time.After(syncWait):
+			return nil, fmt.Errorf("%s: index not synced", cfIndex.Name())
+		case <-cfIndex.WaitForSync():
+		}
+	}
+
 	filterBytes, err := cfIndex.FilterByBlockHash(hash, filterType)
 	if err != nil {
 		context := fmt.Sprintf("Failed to load %v filter for block %v",
@@ -2239,6 +2300,25 @@ func handleGetCFilterHeader(_ context.Context, s *rpcServer, cmd interface{}) (i
 	default:
 		return nil, rpcInvalidError("Unknown filter type %q",
 			c.FilterType)
+	}
+
+	// Ensure the committed filter index is synced.
+	tHeight, tHash, err := cfIndex.Tip()
+	if err != nil {
+		return nil, rpcInternalError(err.Error(), "")
+	}
+
+	chain := s.cfg.Chain
+	if chain.BestSnapshot().Height > (tHeight + 5) {
+		return nil, fmt.Errorf("%s: index not synced", cfIndex.Name())
+	}
+
+	for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+		select {
+		case <-time.After(syncWait):
+			return nil, fmt.Errorf("%s: index not synced", cfIndex.Name())
+		case <-cfIndex.WaitForSync():
+		}
 	}
 
 	headerBytes, err := cfIndex.FilterHeaderByBlockHash(hash, filterType)
@@ -2700,6 +2780,25 @@ func handleGetRawTransaction(_ context.Context, s *rpcServer, cmd interface{}) (
 			return nil, rpcInternalError("The transaction index "+
 				"must be enabled to query the blockchain "+
 				"(specify --txindex)", "Configuration")
+		}
+
+		// Ensure the tx index is synced.
+		tHeight, tHash, err := txIndex.Tip()
+		if err != nil {
+			return nil, rpcInternalError(err.Error(), "")
+		}
+
+		chain := s.cfg.Chain
+		if chain.BestSnapshot().Height > (tHeight + 5) {
+			return nil, fmt.Errorf("%s: index not synced", txIndex.Name())
+		}
+
+		for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+			select {
+			case <-time.After(syncWait):
+				return nil, fmt.Errorf("%s: index not synced", txIndex.Name())
+			case <-txIndex.WaitForSync():
+			}
 		}
 
 		// Look up the location of the transaction.
@@ -3640,6 +3739,27 @@ func fetchInputTxos(s *rpcServer, tx *wire.MsgTx) (map[wire.OutPoint]wire.TxOut,
 			continue
 		}
 
+		txIndex := s.cfg.TxIndex
+
+		// Ensure the tx index is synced.
+		tHeight, tHash, err := txIndex.Tip()
+		if err != nil {
+			return nil, rpcInternalError(err.Error(), "")
+		}
+
+		chain := s.cfg.Chain
+		if chain.BestSnapshot().Height > (tHeight + 5) {
+			return nil, fmt.Errorf("%s: index not synced", txIndex.Name())
+		}
+
+		for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+			select {
+			case <-time.After(syncWait):
+				return nil, fmt.Errorf("%s: index not synced", txIndex.Name())
+			case <-txIndex.WaitForSync():
+			}
+		}
+
 		// Look up the location of the transaction.
 		idxEntry, err := s.cfg.TxIndex.Entry(&origin.Hash)
 		if err != nil {
@@ -3931,6 +4051,25 @@ func handleSearchRawTransactions(_ context.Context, s *rpcServer, cmd interface{
 	// Fetch transactions from the database in the desired order if more
 	// are needed.
 	if len(addressTxns) < numRequested {
+		// Ensure the adddr index is synced.
+		tHeight, tHash, err := addrIndex.Tip()
+		if err != nil {
+			return nil, rpcInternalError(err.Error(), "")
+		}
+
+		chain := s.cfg.Chain
+		if chain.BestSnapshot().Height > (tHeight + 5) {
+			return nil, fmt.Errorf("%s: index not synced", addrIndex.Name())
+		}
+
+		for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+			select {
+			case <-time.After(syncWait):
+				return nil, fmt.Errorf("%s: index not synced", addrIndex.Name())
+			case <-addrIndex.WaitForSync():
+			}
+		}
+
 		err = s.cfg.DB.View(func(dbTx database.Tx) error {
 			idxEntries, dbSkipped, err := addrIndex.EntriesForAddress(
 				dbTx, addr, uint32(numToSkip)-numSkipped,

@@ -465,6 +465,7 @@ type server struct {
 	// if the associated index is not enabled.  These fields are set during
 	// initial creation of the server and never changed afterwards, so they
 	// do not need to be protected for concurrent access.
+	indexSubscriber *indexers.IndexSubscriber
 	txIndex         *indexers.TxIndex
 	addrIndex       *indexers.AddrIndex
 	existsAddrIndex *indexers.ExistsAddrIndex
@@ -1170,6 +1171,29 @@ func (sp *serverPeer) OnGetCFilter(p *peer.Peer, msg *wire.MsgGetCFilter) {
 		return
 	}
 
+	// Ensure the committed filter index is synced.
+	cfIndex := sp.server.cfIndex
+	tHeight, tHash, err := cfIndex.Tip()
+	if err != nil {
+		peerLog.Error(err.Error())
+		return
+	}
+
+	chain := sp.server.chain
+	if chain.BestSnapshot().Height > (tHeight + 5) {
+		peerLog.Errorf("%s: index not synced", cfIndex.Name())
+		return
+	}
+
+	for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+		select {
+		case <-time.After(syncWait):
+			peerLog.Errorf("%s: index not synced", cfIndex.Name())
+			return
+		case <-cfIndex.WaitForSync():
+		}
+	}
+
 	filterBytes, err := sp.server.cfIndex.FilterByBlockHash(&msg.BlockHash,
 		msg.FilterType)
 	if err != nil {
@@ -1291,8 +1315,29 @@ func (sp *serverPeer) OnGetCFHeaders(p *peer.Peer, msg *wire.MsgGetCFHeaders) {
 		return
 	}
 
-	// Generate cfheaders message and send it.
+	// Ensure the committed filter index is synced.
 	cfIndex := sp.server.cfIndex
+	tHeight, tHash, err := cfIndex.Tip()
+	if err != nil {
+		peerLog.Error(err.Error())
+		return
+	}
+
+	if chain.BestSnapshot().Height > (tHeight + 5) {
+		peerLog.Errorf("%s: index not synced", cfIndex.Name())
+		return
+	}
+
+	for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+		select {
+		case <-time.After(syncWait):
+			peerLog.Errorf("%s: index not synced", cfIndex.Name())
+			return
+		case <-cfIndex.WaitForSync():
+		}
+	}
+
+	// Generate cfheaders message and send it.
 	headersMsg := wire.NewMsgCFHeaders()
 	for i := range hashList {
 		// Fetch the raw committed filter header bytes from the database.
@@ -2938,43 +2983,7 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 		services:             services,
 		sigCache:             txscript.NewSigCache(cfg.SigCacheMaxSize),
 		subsidyCache:         standalone.NewSubsidyCache(chainParams),
-	}
-
-	// Create the transaction and address indexes if needed.
-	//
-	// CAUTION: the txindex needs to be first in the indexes array because
-	// the addrindex uses data from the txindex during catchup.  If the
-	// addrindex is run first, it may not have the transactions from the
-	// current block indexed.
-	var indexes []indexers.Indexer
-	if cfg.TxIndex || cfg.AddrIndex {
-		// Enable transaction index if address index is enabled since it
-		// requires it.
-		if !cfg.TxIndex {
-			indxLog.Infof("Transaction index enabled because it " +
-				"is required by the address index")
-			cfg.TxIndex = true
-		} else {
-			indxLog.Info("Transaction index is enabled")
-		}
-
-		s.txIndex = indexers.NewTxIndex(db)
-		indexes = append(indexes, s.txIndex)
-	}
-	if cfg.AddrIndex {
-		indxLog.Info("Address index is enabled")
-		s.addrIndex = indexers.NewAddrIndex(db, chainParams)
-		indexes = append(indexes, s.addrIndex)
-	}
-	if !cfg.NoExistsAddrIndex {
-		indxLog.Info("Exists address index is enabled")
-		s.existsAddrIndex = indexers.NewExistsAddrIndex(db, chainParams)
-		indexes = append(indexes, s.existsAddrIndex)
-	}
-	if !cfg.NoCFilters {
-		indxLog.Info("CF index is enabled")
-		s.cfIndex = indexers.NewCfIndex(db, chainParams)
-		indexes = append(indexes, s.cfIndex)
+		indexSubscriber:      indexers.NewIndexSubscriber(ctx),
 	}
 
 	feC := fees.EstimatorConfig{
@@ -2997,12 +3006,6 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 	}
 	s.feeEstimator = fe
 
-	// Create an index manager if any of the optional indexes are enabled.
-	var indexManager indexers.IndexManager
-	if len(indexes) > 0 {
-		indexManager = indexers.NewManager(db, indexes, chainParams)
-	}
-
 	// Only configure checkpoints when enabled.
 	var checkpoints []chaincfg.Checkpoint
 	if !cfg.DisableCheckpoints {
@@ -3021,12 +3024,54 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 					s.blockManager.handleBlockchainNotification(notification)
 				}
 			},
-			SigCache:     s.sigCache,
-			SubsidyCache: s.subsidyCache,
-			IndexManager: indexManager,
+			SigCache:        s.sigCache,
+			SubsidyCache:    s.subsidyCache,
+			IndexSubscriber: s.indexSubscriber,
 		})
 	if err != nil {
 		return nil, err
+	}
+
+	if cfg.TxIndex || cfg.AddrIndex {
+		// Enable transaction index if address index is enabled since it
+		// requires it.
+		if !cfg.TxIndex {
+			indxLog.Infof("Transaction index enabled because it " +
+				"is required by the address index")
+			cfg.TxIndex = true
+		} else {
+			indxLog.Info("Transaction index is enabled")
+		}
+
+		s.txIndex, err = indexers.NewTxIndex(ctx, db, s.chain, s.chainParams,
+			s.indexSubscriber)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if cfg.AddrIndex {
+		indxLog.Info("Address index is enabled")
+		s.addrIndex, err = indexers.NewAddrIndex(ctx, db, s.chain, s.chainParams,
+			s.indexSubscriber)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !cfg.NoExistsAddrIndex {
+		indxLog.Info("Exists address index is enabled")
+		s.existsAddrIndex, err = indexers.NewExistsAddrIndex(ctx, db, s.chain,
+			s.chainParams, s.indexSubscriber)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !cfg.NoCFilters {
+		indxLog.Info("CF index is enabled")
+		s.cfIndex, err = indexers.NewCfIndex(ctx, db, s.chain,
+			s.chainParams, s.indexSubscriber)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	txC := mempool.Config{
@@ -3091,6 +3136,7 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 		FeeEstimator:       s.feeEstimator,
 		TxMemPool:          s.txMemPool,
 		BgBlkTmplGenerator: nil, // Created later.
+		IndexSubscriber:    s.indexSubscriber,
 		NotifyWinningTickets: func(wtnd *WinningTicketsNtfnData) {
 			if s.rpcServer != nil {
 				s.rpcServer.ntfnMgr.NotifyWinningTickets(wtnd)

@@ -18,6 +18,7 @@ import (
 
 	"github.com/decred/dcrd/blockchain/standalone/v2"
 	"github.com/decred/dcrd/blockchain/v3"
+	"github.com/decred/dcrd/blockchain/v3/indexers"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/chaincfg/v3"
 	"github.com/decred/dcrd/database/v2"
@@ -272,6 +273,7 @@ type blockManagerConfig struct {
 	FeeEstimator       *fees.Estimator
 	TxMemPool          *mempool.TxPool
 	BgBlkTmplGenerator *BgBlkTmplGenerator
+	IndexSubscriber    *indexers.IndexSubscriber
 
 	// The following fields are blockManager callbacks.
 	NotifyWinningTickets      func(*WinningTicketsNtfnData)
@@ -2030,6 +2032,23 @@ func (b *blockManager) handleBlockchainNotification(notification *blockchain.Not
 			b.cfg.BgBlkTmplGenerator.BlockConnected(block)
 		}
 
+		prevScripter, err := b.cfg.Chain.PrevScripts(block)
+		if err != nil {
+			bmgrLog.Errorf("unable to fetch prevScripts for block %s",
+				block.Hash().String())
+			break
+		}
+
+		// Notify subscribed indexes of connected block.
+		if b.cfg.IndexSubscriber != nil {
+			b.cfg.IndexSubscriber.Notify(&indexers.IndexNtfn{
+				NtfnType:    indexers.ConnectNtfn,
+				Block:       block,
+				Parent:      parentBlock,
+				PrevScripts: prevScripter,
+			})
+		}
+
 	// Stake tickets are spent or missed from the most recently connected block.
 	case blockchain.NTSpentAndMissedTickets:
 		tnd, ok := notification.Data.(*blockchain.TicketNotificationsData)
@@ -2133,6 +2152,23 @@ func (b *blockManager) handleBlockchainNotification(notification *blockchain.Not
 
 			// Notify registered websocket clients.
 			r.ntfnMgr.NotifyBlockDisconnected(block)
+		}
+
+		prevScripter, err := b.cfg.Chain.PrevScripts(block)
+		if err != nil {
+			bmgrLog.Errorf("unable to fetch prevscripts for block %s",
+				block.Hash().String())
+			break
+		}
+
+		// Notify subscribed indexes of disconnected block.
+		if b.cfg.IndexSubscriber != nil {
+			b.cfg.IndexSubscriber.Notify(&indexers.IndexNtfn{
+				NtfnType:    indexers.DisconnectNtfn,
+				Block:       block,
+				Parent:      parentBlock,
+				PrevScripts: prevScripter,
+			})
 		}
 
 	// Chain reorganization has commenced.
