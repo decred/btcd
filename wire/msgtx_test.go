@@ -719,7 +719,7 @@ func TestTxOverflowErrors(t *testing.T) {
 				0x01, 0x00, 0x00, 0x00, // Version
 				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 				0xff, // Varint for number of input transactions
-			}, pver, txVer, &MessageError{},
+			}, pver, txVer, ErrTooManyTxs,
 		},
 
 		// Transaction that claims to have ~uint64(0) outputs. [1]
@@ -729,7 +729,7 @@ func TestTxOverflowErrors(t *testing.T) {
 				0x00, // Varint for number of input transactions
 				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 				0xff, // Varint for number of output transactions
-			}, pver, txVer, &MessageError{},
+			}, pver, txVer, ErrTooManyTxs,
 		},
 
 		// Transaction that has an input with a signature script that [2]
@@ -777,7 +777,7 @@ func TestTxOverflowErrors(t *testing.T) {
 				0x00, 0x00, 0x00, 0x00, // Expiry
 				0x01,                                                 // Varint for number of input signature
 				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // Varint for sig script length (overflows)
-			}, pver, txVer, &MessageError{},
+			}, pver, txVer, ErrTooManyTxs,
 		},
 
 		// Transaction that has an output with a public key script [3]
@@ -798,7 +798,7 @@ func TestTxOverflowErrors(t *testing.T) {
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Transaction amount
 				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 				0xff, // Varint for length of public key script
-			}, pver, txVer, &MessageError{},
+			}, pver, txVer, ErrNonCanonicalVarInt,
 		},
 	}
 
@@ -808,17 +808,17 @@ func TestTxOverflowErrors(t *testing.T) {
 		var msg MsgTx
 		r := bytes.NewReader(test.buf)
 		err := msg.BtcDecode(r, test.pver)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
+		if !errors.Is(err, test.err) {
 			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
-				i, err, reflect.TypeOf(test.err))
+				i, err, test.err)
 		}
 
 		// Decode from wire format.
 		r = bytes.NewReader(test.buf)
 		err = msg.Deserialize(r)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
+		if !errors.Is(err, test.err) {
 			t.Errorf("Deserialize #%d wrong error got: %v, want: %v",
-				i, err, reflect.TypeOf(test.err))
+				i, err, test.err)
 			continue
 		}
 	}

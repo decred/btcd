@@ -10,13 +10,12 @@ import (
 	"testing"
 )
 
-// TestMessageErrorCodeStringer tests the stringized output for
-// the ErrorCode type.
-func TestMessageErrorCodeStringer(t *testing.T) {
+// TestErrorKindStringer tests the stringized output for the ErrorKind type.
+func TestErrorKindStringer(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		in   ErrorCode
+		in   ErrorKind
 		want string
 	}{
 		{ErrNonCanonicalVarInt, "ErrNonCanonicalVarInt"},
@@ -50,15 +49,12 @@ func TestMessageErrorCodeStringer(t *testing.T) {
 		{ErrTooManyInitStateTypes, "ErrTooManyInitStateTypes"},
 		{ErrInitStateTypeTooLong, "ErrInitStateTypeTooLong"},
 		{ErrTooManyTSpends, "ErrTooManyTSpends"},
-
-		{0xffff, "Unknown ErrorCode (65535)"},
 	}
 
-	t.Logf("Running %d tests", len(tests))
 	for i, test := range tests {
-		result := test.in.String()
+		result := test.in.Error()
 		if result != test.want {
-			t.Errorf("String #%d\n got: %s want: %s", i, result,
+			t.Errorf("%d: got: %s want: %s", i, result,
 				test.want)
 			continue
 		}
@@ -78,12 +74,8 @@ func TestMessageError(t *testing.T) {
 	}, {
 		MessageError{Description: "human-readable error"},
 		"human-readable error",
-	}, {
-		MessageError{Func: "foo", Description: "something bad happened"},
-		"foo: something bad happened",
 	}}
 
-	t.Logf("Running %d tests", len(tests))
 	for i, test := range tests {
 		result := test.in.Error()
 		if result != test.want {
@@ -93,7 +85,7 @@ func TestMessageError(t *testing.T) {
 	}
 }
 
-// TestErrorCodeIsAs ensures both ErrorCode and MessageError can be identified
+// TestErrorKindIsAs ensures both ErrorKind and MessageError can be identified
 // as being a specific error code via errors.Is and unwrapped via errors.As.
 func TestErrorCodeIsAs(t *testing.T) {
 	tests := []struct {
@@ -101,7 +93,7 @@ func TestErrorCodeIsAs(t *testing.T) {
 		err       error
 		target    error
 		wantMatch bool
-		wantAs    ErrorCode
+		wantAs    ErrorKind
 	}{{
 		name:      "ErrTooManyAddrs == ErrTooManyAddrs",
 		err:       ErrTooManyAddrs,
@@ -112,12 +104,6 @@ func TestErrorCodeIsAs(t *testing.T) {
 		name:      "MessageError.ErrTooManyAddrs == ErrTooManyAddrs",
 		err:       messageError("", ErrTooManyAddrs, ""),
 		target:    ErrTooManyAddrs,
-		wantMatch: true,
-		wantAs:    ErrTooManyAddrs,
-	}, {
-		name:      "ErrTooManyAddrs == MessageError.ErrTooManyAddrs",
-		err:       ErrTooManyAddrs,
-		target:    messageError("", ErrTooManyAddrs, ""),
 		wantMatch: true,
 		wantAs:    ErrTooManyAddrs,
 	}, {
@@ -161,16 +147,16 @@ func TestErrorCodeIsAs(t *testing.T) {
 			continue
 		}
 
-		// Ensure the underlying error code can be unwrapped and is the expected
-		// code.
-		var code ErrorCode
-		if !errors.As(test.err, &code) {
+		// Ensure the underlying error kind can be unwrapped and is the
+		// expected error.
+		var kind ErrorKind
+		if !errors.As(test.err, &kind) {
 			t.Errorf("%s: unable to unwrap to error code", test.name)
 			continue
 		}
-		if code != test.wantAs {
-			t.Errorf("%s: unexpected unwrapped error code -- got %v, want %v",
-				test.name, code, test.wantAs)
+		if kind != test.wantAs {
+			t.Errorf("%s: unexpected unwrapped error kind -- got %v, want %v",
+				test.name, kind, test.wantAs)
 			continue
 		}
 	}

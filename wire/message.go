@@ -263,10 +263,10 @@ func WriteMessageN(w io.Writer, msg Message, pver uint32, dcrnet CurrencyNet) (i
 	// Enforce maximum message payload based on the message type.
 	mpl := msg.MaxPayloadLength(pver)
 	if uint32(lenp) > mpl {
-		str := fmt.Sprintf("message payload is too large - encoded "+
+		msg := fmt.Sprintf("message payload is too large - encoded "+
 			"%d bytes, but maximum message payload size for "+
 			"messages of type [%s] is %d.", lenp, cmd, mpl)
-		return totalBytes, messageError(op, ErrPayloadTooLarge, str)
+		return totalBytes, messageError(op, ErrPayloadTooLarge, msg)
 	}
 
 	// Create header for the message.

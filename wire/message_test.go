@@ -250,7 +250,7 @@ func TestReadMessageWireErrors(t *testing.T) {
 			pver,
 			dcrnet,
 			len(testNetBytes),
-			&MessageError{},
+			ErrWrongNetwork,
 			24,
 		},
 
@@ -260,7 +260,7 @@ func TestReadMessageWireErrors(t *testing.T) {
 			pver,
 			dcrnet,
 			len(exceedMaxPayloadBytes),
-			&MessageError{},
+			ErrPayloadTooLarge,
 			24,
 		},
 
@@ -270,7 +270,7 @@ func TestReadMessageWireErrors(t *testing.T) {
 			pver,
 			dcrnet,
 			len(badCommandBytes),
-			&MessageError{},
+			ErrMalformedCmd,
 			24,
 		},
 
@@ -280,7 +280,7 @@ func TestReadMessageWireErrors(t *testing.T) {
 			pver,
 			dcrnet,
 			len(unsupportedCommandBytes),
-			&MessageError{},
+			ErrUnknownCmd,
 			24,
 		},
 
@@ -290,7 +290,7 @@ func TestReadMessageWireErrors(t *testing.T) {
 			pver,
 			dcrnet,
 			len(exceedTypePayloadBytes),
-			&MessageError{},
+			ErrPayloadTooLarge,
 			24,
 		},
 
@@ -310,7 +310,7 @@ func TestReadMessageWireErrors(t *testing.T) {
 			pver,
 			dcrnet,
 			len(badChecksumBytes),
-			&MessageError{},
+			ErrPayloadChecksum,
 			26,
 		},
 
@@ -320,7 +320,7 @@ func TestReadMessageWireErrors(t *testing.T) {
 			pver,
 			dcrnet,
 			len(badMessageBytes),
-			&MessageError{},
+			ErrPayloadChecksum,
 			25,
 		},
 
@@ -330,7 +330,7 @@ func TestReadMessageWireErrors(t *testing.T) {
 			pver,
 			dcrnet,
 			len(discardBytes),
-			&MessageError{},
+			ErrUnknownCmd,
 			24,
 		},
 	}
@@ -340,9 +340,9 @@ func TestReadMessageWireErrors(t *testing.T) {
 		// Decode from wire format.
 		r := newFixedReader(test.max, test.buf)
 		nr, _, _, err := ReadMessageN(r, test.pver, test.dcrnet)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.readErr) {
-			t.Errorf("ReadMessage #%d wrong error got: %v <%T>, "+
-				"want: %T", i, err, err, test.readErr)
+		if !errors.Is(err, test.readErr) {
+			t.Errorf("ReadMessage #%d wrong error got: %v, "+
+				"want: %v", i, err.Error(), test.readErr)
 			continue
 		}
 
@@ -350,18 +350,6 @@ func TestReadMessageWireErrors(t *testing.T) {
 		if nr != test.bytes {
 			t.Errorf("ReadMessage #%d unexpected num bytes read - "+
 				"got %d, want %d", i, nr, test.bytes)
-		}
-
-		// For errors which are not of type MessageError, check them for
-		// equality.
-		var merr *MessageError
-		if !errors.As(err, &merr) {
-			if !errors.Is(err, test.readErr) {
-				t.Errorf("ReadMessage #%d wrong error got: %v <%T>, "+
-					"want: %v <%T>", i, err, err,
-					test.readErr, test.readErr)
-				continue
-			}
 		}
 	}
 }
@@ -371,7 +359,6 @@ func TestReadMessageWireErrors(t *testing.T) {
 func TestWriteMessageWireErrors(t *testing.T) {
 	pver := ProtocolVersion
 	dcrnet := MainNet
-	wireErr := &MessageError{}
 
 	// Fake message with a command that is too long.
 	badCommandMsg := &fakeMessage{command: "somethingtoolong"}
@@ -401,13 +388,13 @@ func TestWriteMessageWireErrors(t *testing.T) {
 		bytes  int         // Expected num bytes written
 	}{
 		// Command too long.
-		{badCommandMsg, pver, dcrnet, 0, wireErr, 0},
+		{badCommandMsg, pver, dcrnet, 0, ErrCmdTooLong, 0},
 		// Force error in payload encode.
-		{encodeErrMsg, pver, dcrnet, 0, wireErr, 0},
+		{encodeErrMsg, pver, dcrnet, 0, ErrInvalidMsg, 0},
 		// Force error due to exceeding max overall message payload size.
-		{exceedOverallPayloadErrMsg, pver, dcrnet, 0, wireErr, 0},
+		{exceedOverallPayloadErrMsg, pver, dcrnet, 0, ErrPayloadTooLarge, 0},
 		// Force error due to exceeding max payload for message type.
-		{exceedPayloadErrMsg, pver, dcrnet, 0, wireErr, 0},
+		{exceedPayloadErrMsg, pver, dcrnet, 0, ErrPayloadTooLarge, 0},
 		// Force error in header write.
 		{bogusMsg, pver, dcrnet, 0, io.ErrShortWrite, 0},
 		// Force error in payload write.
@@ -419,9 +406,9 @@ func TestWriteMessageWireErrors(t *testing.T) {
 		// Encode wire format.
 		w := newFixedWriter(test.max)
 		nw, err := WriteMessageN(w, test.msg, test.pver, test.dcrnet)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
-			t.Errorf("WriteMessage #%d wrong error got: %v <%T>, "+
-				"want: %T", i, err, err, test.err)
+		if !errors.Is(err, test.err) {
+			t.Errorf("ReadMessage #%d wrong error got: %v <%T>, "+
+				"want: %v <%T>", i, err, err, test.err, test.err)
 			continue
 		}
 
@@ -429,17 +416,6 @@ func TestWriteMessageWireErrors(t *testing.T) {
 		if nw != test.bytes {
 			t.Errorf("WriteMessage #%d unexpected num bytes "+
 				"written - got %d, want %d", i, nw, test.bytes)
-		}
-
-		// For errors which are not of type MessageError, check them for
-		// equality.
-		var merr *MessageError
-		if !errors.As(err, &merr) {
-			if !errors.Is(err, test.err) {
-				t.Errorf("ReadMessage #%d wrong error got: %v <%T>, "+
-					"want: %v <%T>", i, err, err, test.err, test.err)
-				continue
-			}
 		}
 	}
 }

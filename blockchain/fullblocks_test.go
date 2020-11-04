@@ -218,7 +218,7 @@ func TestFullBlocks(t *testing.T) {
 		// Ensure there is an error due to deserializing the block.
 		var msgBlock wire.MsgBlock
 		err := msgBlock.BtcDecode(bytes.NewReader(item.RawBlock), 0)
-		var werr *wire.MessageError
+		var werr wire.MessageError
 		if !errors.As(err, &werr) {
 			t.Fatalf("block %q (hash %s, height %d) should have "+
 				"failed to decode", item.Name, blockHash,

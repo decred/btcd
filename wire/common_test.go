@@ -403,7 +403,7 @@ func TestVarIntNonCanonical(t *testing.T) {
 		// Decode from wire format.
 		rbuf := bytes.NewReader(test.in)
 		val, err := ReadVarInt(rbuf, test.pver)
-		var merr *MessageError
+		var merr MessageError
 		if !errors.As(err, &merr) {
 			t.Errorf("ReadVarInt #%d (%s) unexpected error %v", i,
 				test.name, err)
@@ -565,11 +565,11 @@ func TestVarStringOverflowErrors(t *testing.T) {
 	}{
 		{
 			[]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
-			pver, &MessageError{},
+			pver, MessageError{},
 		},
 		{
 			[]byte{0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
-			pver, &MessageError{},
+			pver, MessageError{},
 		},
 	}
 
@@ -835,13 +835,11 @@ func TestVarBytesOverflowErrors(t *testing.T) {
 	}{
 		{
 			[]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
-			pver,
-			&MessageError{},
+			pver, ErrVarBytesTooLong,
 		},
 		{
 			[]byte{0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
-			pver,
-			&MessageError{},
+			pver, ErrVarBytesTooLong,
 		},
 	}
 
@@ -851,9 +849,9 @@ func TestVarBytesOverflowErrors(t *testing.T) {
 		rbuf := bytes.NewReader(test.buf)
 		_, err := ReadVarBytes(rbuf, test.pver, MaxMessagePayload,
 			"test payload")
-		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
+		if !errors.Is(err, test.err) {
 			t.Errorf("ReadVarBytes #%d wrong error got: %v, "+
-				"want: %v", i, err, reflect.TypeOf(test.err))
+				"want: %v", i, err, test.err)
 			continue
 		}
 	}

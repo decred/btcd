@@ -26,8 +26,9 @@ func (msg *fakeMessage) BtcDecode(r io.Reader, pver uint32) error {
 // Message interface.
 func (msg *fakeMessage) BtcEncode(w io.Writer, pver uint32) error {
 	if msg.forceEncodeErr {
-		err := &MessageError{
+		err := MessageError{
 			Func:        "fakeMessage.BtcEncode",
+			Err:         ErrInvalidMsg,
 			Description: "intentional error",
 		}
 		return err

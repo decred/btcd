@@ -1506,9 +1506,9 @@ func (sp *serverPeer) OnAddr(p *peer.Peer, msg *wire.MsgAddr) {
 // the bytes received by the server.
 func (sp *serverPeer) OnRead(p *peer.Peer, bytesRead int, msg wire.Message, err error) {
 	// Ban peers sending messages that do not conform to the wire protocol.
-	var errCode wire.ErrorCode
-	if errors.As(err, &errCode) {
-		peerLog.Errorf("Unable to read wire message from %s: %v", sp, err)
+	var werr wire.MessageError
+	if errors.As(err, &werr) {
+		peerLog.Errorf("Unable to read wire message from %s: %v", sp, werr)
 		sp.server.BanPeer(sp)
 	}
 
