@@ -97,15 +97,6 @@ func (p *rpcPeer) IsTxRelayDisabled() bool {
 	return (*serverPeer)(p).relayTxDisabled()
 }
 
-// BanScore returns the current integer value that represents how close the peer
-// is to being banned.
-//
-// This function is safe for concurrent access and is part of the rpcserver.Peer
-// interface implementation.
-func (p *rpcPeer) BanScore() uint32 {
-	return (*serverPeer)(p).banScore.Int()
-}
-
 // rpcConnManager provides a connection manager for use with the RPC server and
 // implements the rpcserver.ConnManager interface.
 type rpcConnManager struct {

@@ -33,6 +33,7 @@ import (
 	"github.com/decred/dcrd/blockchain/v4/indexers"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/connmgr/v3"
 	"github.com/decred/dcrd/database/v2"
 	"github.com/decred/dcrd/dcrjson/v3"
 	"github.com/decred/dcrd/dcrutil/v4"
@@ -1751,6 +1752,7 @@ func defaultMockConfig(chainParams *chaincfg.Params) *Config {
 		MaxProtocolVersion: wire.CFilterV2Version,
 		UserAgentVersion: fmt.Sprintf("%d.%d.%d", version.Major, version.Minor,
 			version.Patch),
+		BanMgr: &connmgr.BanManager{},
 	}
 }
 

@@ -48,6 +48,7 @@ import (
 	"github.com/decred/dcrd/internal/mempool"
 	"github.com/decred/dcrd/internal/mining"
 	"github.com/decred/dcrd/internal/version"
+	"github.com/decred/dcrd/peer/v2"
 	"github.com/decred/dcrd/rpc/jsonrpc/types/v3"
 	"github.com/decred/dcrd/txscript/v4"
 	"github.com/decred/dcrd/wire"
@@ -2604,6 +2605,7 @@ func handleGetNetworkInfo(_ context.Context, s *Server, cmd interface{}) (interf
 func handleGetPeerInfo(_ context.Context, s *Server, cmd interface{}) (interface{}, error) {
 	peers := s.cfg.ConnMgr.ConnectedPeers()
 	syncPeerID := s.cfg.SyncMgr.SyncPeerID()
+	bmgr := s.cfg.BanMgr
 	infos := make([]*types.GetPeerInfoResult, 0, len(peers))
 	for _, p := range peers {
 		statsSnap := p.StatsSnapshot()
@@ -2611,6 +2613,7 @@ func handleGetPeerInfo(_ context.Context, s *Server, cmd interface{}) (interface
 		if addrLocal := p.LocalAddr(); addrLocal != nil {
 			addrLocalStr = addrLocal.String()
 		}
+		_, banScore := bmgr.LookupPeer(p.Addr())
 		info := &types.GetPeerInfoResult{
 			ID:             statsSnap.ID,
 			Addr:           statsSnap.Addr,
@@ -2629,7 +2632,7 @@ func handleGetPeerInfo(_ context.Context, s *Server, cmd interface{}) (interface
 			Inbound:        statsSnap.Inbound,
 			StartingHeight: statsSnap.StartingHeight,
 			CurrentHeight:  statsSnap.LastBlock,
-			BanScore:       int32(p.BanScore()),
+			BanScore:       int32(banScore),
 			SyncNode:       p.ID() == syncPeerID,
 		}
 		if p.LastPingNonce() != 0 {
@@ -6237,6 +6240,9 @@ type Config struct {
 
 	// FiltererV2 defines the V2 filterer for the RPC server to use.
 	FiltererV2 FiltererV2
+
+	// BanMgr defines the peer manager for the RPC server to use.
+	BanMgr peer.BanManager
 }
 
 // New returns a new instance of the Server struct.

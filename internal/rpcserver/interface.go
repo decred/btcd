@@ -55,10 +55,6 @@ type Peer interface {
 	// IsTxRelayDisabled returns whether or not the peer has disabled
 	// transaction relay.
 	IsTxRelayDisabled() bool
-
-	// BanScore returns the current integer value that represents how close
-	// the peer is to being banned.
-	BanScore() uint32
 }
 
 // AddrManager represents an address manager for use with the RPC server.

@@ -456,6 +456,7 @@ type server struct {
 	chainParams          *chaincfg.Params
 	addrManager          *addrmgr.AddrManager
 	connManager          *connmgr.ConnManager
+	banManager           peer.BanManager
 	sigCache             *txscript.SigCache
 	subsidyCache         *standalone.SubsidyCache
 	rpcServer            *rpcserver.Server
@@ -468,7 +469,7 @@ type server struct {
 	modifyRebroadcastInv chan interface{}
 	newPeers             chan *serverPeer
 	donePeers            chan *serverPeer
-	banPeers             chan *serverPeer
+	banPeers             chan *peer.Peer
 	query                chan interface{}
 	relayInv             chan relayMsg
 	broadcast            chan broadcastMsg
@@ -506,13 +507,13 @@ type serverPeer struct {
 
 	connReq        *connmgr.ConnReq
 	server         *server
+	banManager     peer.BanManager
 	persistent     bool
 	continueHash   *chainhash.Hash
 	relayMtx       sync.Mutex
 	disableRelayTx bool
 	isWhitelisted  bool
 	knownAddresses lru.Cache
-	banScore       connmgr.DynamicBanScore
 	quit           chan struct{}
 
 	// addrsSent, getMiningStateSent and initState all track whether or not
@@ -537,6 +538,7 @@ type serverPeer struct {
 func newServerPeer(s *server, isPersistent bool) *serverPeer {
 	return &serverPeer{
 		server:         s,
+		banManager:     s.banManager,
 		persistent:     isPersistent,
 		knownAddresses: lru.NewCache(maxKnownAddrsPerPeer),
 		quit:           make(chan struct{}),
@@ -601,47 +603,6 @@ func (sp *serverPeer) pushAddrMsg(addresses []*wire.NetAddress) {
 		return
 	}
 	sp.addKnownAddresses(known)
-}
-
-// addBanScore increases the persistent and decaying ban score fields by the
-// values passed as parameters. If the resulting score exceeds half of the ban
-// threshold, a warning is logged including the reason provided. Further, if
-// the score is above the ban threshold, the peer will be banned and
-// disconnected.
-func (sp *serverPeer) addBanScore(persistent, transient uint32, reason string) bool {
-	// No warning is logged and no score is calculated if banning is disabled.
-	if cfg.DisableBanning {
-		return false
-	}
-	if sp.isWhitelisted {
-		peerLog.Debugf("Misbehaving whitelisted peer %s: %s", sp, reason)
-		return false
-	}
-
-	warnThreshold := cfg.BanThreshold >> 1
-	if transient == 0 && persistent == 0 {
-		// The score is not being increased, but a warning message is still
-		// logged if the score is above the warn threshold.
-		score := sp.banScore.Int()
-		if score > warnThreshold {
-			peerLog.Warnf("Misbehaving peer %s: %s -- ban score is %d, "+
-				"it was not increased this time", sp, reason, score)
-		}
-		return false
-	}
-	score := sp.banScore.Increase(persistent, transient)
-	if score > warnThreshold {
-		peerLog.Warnf("Misbehaving peer %s: %s -- ban score increased to %d",
-			sp, reason, score)
-		if score > cfg.BanThreshold {
-			peerLog.Warnf("Misbehaving peer %s -- banning and disconnecting",
-				sp)
-			sp.server.BanPeer(sp)
-			sp.Disconnect()
-			return true
-		}
-	}
-	return false
 }
 
 // hasServices returns whether or not the provided advertised service flags have
@@ -745,7 +706,7 @@ func (sp *serverPeer) OnMemPool(p *peer.Peer, msg *wire.MsgMemPool) {
 	// The ban score accumulates and passes the ban threshold if a burst of
 	// mempool messages comes from a peer. The score decays each minute to
 	// half of its value.
-	if sp.addBanScore(0, 33, "mempool") {
+	if sp.banManager.AddBanScore(p, 0, 33, "mempool") {
 		return
 	}
 
@@ -1037,7 +998,7 @@ func (sp *serverPeer) OnBlock(p *peer.Peer, msg *wire.MsgBlock, buf []byte) {
 func (sp *serverPeer) OnInv(p *peer.Peer, msg *wire.MsgInv) {
 	// Ban peers sending empty inventory requests.
 	if len(msg.InvList) == 0 {
-		sp.server.BanPeer(sp)
+		sp.banManager.BanPeer(p)
 		return
 	}
 
@@ -1066,10 +1027,10 @@ func (sp *serverPeer) OnInv(p *peer.Peer, msg *wire.MsgInv) {
 
 // OnHeaders is invoked when a peer receives a headers wire message.  The
 // message is passed down to the net sync manager.
-func (sp *serverPeer) OnHeaders(_ *peer.Peer, msg *wire.MsgHeaders) {
+func (sp *serverPeer) OnHeaders(p *peer.Peer, msg *wire.MsgHeaders) {
 	// Ban peers sending empty headers requests.
 	if len(msg.Headers) == 0 {
-		sp.server.BanPeer(sp)
+		sp.banManager.BanPeer(p)
 		return
 	}
 
@@ -1081,7 +1042,7 @@ func (sp *serverPeer) OnHeaders(_ *peer.Peer, msg *wire.MsgHeaders) {
 func (sp *serverPeer) OnGetData(p *peer.Peer, msg *wire.MsgGetData) {
 	// Ban peers sending empty getdata requests.
 	if len(msg.InvList) == 0 {
-		sp.server.BanPeer(sp)
+		sp.banManager.BanPeer(p)
 		return
 	}
 
@@ -1096,7 +1057,8 @@ func (sp *serverPeer) OnGetData(p *peer.Peer, msg *wire.MsgGetData) {
 	// bursts of small requests are not penalized as that would potentially ban
 	// peers performing IBD.
 	// This incremental score decays each minute to half of its value.
-	if sp.addBanScore(0, uint32(length)*99/wire.MaxInvPerMsg, "getdata") {
+	if sp.banManager.AddBanScore(p, 0,
+		uint32(length)*99/wire.MaxInvPerMsg, "getdata") {
 		return
 	}
 
@@ -1238,7 +1200,7 @@ func (sp *serverPeer) enforceNodeCFFlag(cmd string) {
 	// violation is logged and the peer is disconnected regardless.
 	if sp.ProtocolVersion() >= wire.NodeCFVersion && !cfg.DisableBanning {
 		// Disconnect the peer regardless of whether it was banned.
-		sp.addBanScore(100, 0, cmd)
+		sp.banManager.AddBanScore(sp.Peer, cfg.BanThreshold, 0, cmd)
 		sp.Disconnect()
 		return
 	}
@@ -1346,7 +1308,7 @@ func (sp *serverPeer) OnAddr(p *peer.Peer, msg *wire.MsgAddr) {
 			msg.Command(), p)
 
 		// Ban peers sending empty address requests.
-		sp.server.BanPeer(sp)
+		sp.banManager.BanPeer(p)
 		return
 	}
 
@@ -1383,7 +1345,7 @@ func (sp *serverPeer) OnRead(p *peer.Peer, bytesRead int, msg wire.Message, err 
 	var errCode wire.ErrorCode
 	if errors.As(err, &errCode) {
 		peerLog.Errorf("Unable to read wire message from %s: %v", sp, err)
-		sp.server.BanPeer(sp)
+		sp.banManager.BanPeer(p)
 	}
 
 	sp.server.AddBytesReceived(uint64(bytesRead))
@@ -1418,14 +1380,14 @@ func (sp *serverPeer) OnNotFound(p *peer.Peer, msg *wire.MsgNotFound) {
 	if numBlocks > 0 {
 		blockStr := pickNoun(uint64(numBlocks), "block", "blocks")
 		reason := fmt.Sprintf("%d %v not found", numBlocks, blockStr)
-		if sp.addBanScore(20*numBlocks, 0, reason) {
+		if sp.banManager.AddBanScore(p, 20*numBlocks, 0, reason) {
 			return
 		}
 	}
 	if numTxns > 0 {
 		txStr := pickNoun(uint64(numTxns), "transaction", "transactions")
 		reason := fmt.Sprintf("%d %v not found", numBlocks, txStr)
-		if sp.addBanScore(0, 10*numTxns, reason) {
+		if sp.banManager.AddBanScore(p, 0, 10*numTxns, reason) {
 			return
 		}
 	}
@@ -1784,13 +1746,13 @@ func (s *server) handleDonePeerMsg(state *peerState, sp *serverPeer) {
 
 // handleBanPeerMsg deals with banning peers.  It is invoked from the
 // peerHandler goroutine.
-func (s *server) handleBanPeerMsg(state *peerState, sp *serverPeer) {
-	host, _, err := net.SplitHostPort(sp.Addr())
+func (s *server) handleBanPeerMsg(state *peerState, p *peer.Peer) {
+	host, _, err := net.SplitHostPort(p.Addr())
 	if err != nil {
-		srvrLog.Debugf("can't split ban peer %s %v", sp.Addr(), err)
+		srvrLog.Debugf("can't split ban peer %s %v", p.Addr(), err)
 		return
 	}
-	direction := directionString(sp.Inbound())
+	direction := directionString(p.Inbound())
 	srvrLog.Infof("Banned peer %s (%s) for %v", host, direction,
 		cfg.BanDuration)
 	state.banned[host] = time.Now().Add(cfg.BanDuration)
@@ -2110,10 +2072,14 @@ func newPeerConfig(sp *serverPeer) *peer.Config {
 // for disconnection.
 func (s *server) inboundPeerConnected(conn net.Conn) {
 	sp := newServerPeer(s, false)
-	sp.isWhitelisted = isWhitelisted(conn.RemoteAddr())
 	sp.Peer = peer.NewInboundPeer(newPeerConfig(sp))
 	sp.AssociateConnection(conn)
+	whitelisted := s.banManager.IsPeerWhitelisted(sp.Peer)
+	if whitelisted {
+		sp.Peer.SetIsWhitelisted(whitelisted)
+	}
 	go s.peerDoneHandler(sp)
+	s.banManager.AddPeer(sp.Peer)
 }
 
 // outboundPeerConnected is invoked by the connection manager when a new
@@ -2131,16 +2097,21 @@ func (s *server) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) {
 	}
 	sp.Peer = p
 	sp.connReq = c
-	sp.isWhitelisted = isWhitelisted(conn.RemoteAddr())
 	sp.AssociateConnection(conn)
+	whitelisted := s.banManager.IsPeerWhitelisted(sp.Peer)
+	if whitelisted {
+		sp.Peer.SetIsWhitelisted(whitelisted)
+	}
 	go s.peerDoneHandler(sp)
 	s.addrManager.Attempt(sp.NA())
+	s.banManager.AddPeer(sp.Peer)
 }
 
 // peerDoneHandler handles peer disconnects by notifying the server that it's
 // done along with other performing other desirable cleanup.
 func (s *server) peerDoneHandler(sp *serverPeer) {
 	sp.WaitForDisconnect()
+	s.banManager.RemovePeer(sp.Peer)
 	s.donePeers <- sp
 
 	// Notify the net sync manager the peer is gone if it was ever notified that
@@ -2252,14 +2223,14 @@ func (s *server) AddPeer(sp *serverPeer) {
 	s.newPeers <- sp
 }
 
-// BanPeer bans a peer that has already been connected to the server by ip
+// banPeer bans a peer that has already been connected to the server by ip
 // unless banning is disabled or the peer has been whitelisted.
-func (s *server) BanPeer(sp *serverPeer) {
-	if cfg.DisableBanning || sp.isWhitelisted {
+func (s *server) banPeer(p *peer.Peer) {
+	if cfg.DisableBanning || p.IsWhitelisted() {
 		return
 	}
-	sp.Disconnect()
-	s.banPeers <- sp
+	p.Disconnect()
+	s.banPeers <- p
 }
 
 // RelayInventory relays the passed inventory vector to all connected peers
@@ -3347,7 +3318,7 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 		addrManager:           amgr,
 		newPeers:              make(chan *serverPeer, cfg.MaxPeers),
 		donePeers:             make(chan *serverPeer, cfg.MaxPeers),
-		banPeers:              make(chan *serverPeer, cfg.MaxPeers),
+		banPeers:              make(chan *peer.Peer, cfg.MaxPeers),
 		query:                 make(chan interface{}),
 		relayInv:              make(chan relayMsg, cfg.MaxPeers),
 		broadcast:             make(chan broadcastMsg, cfg.MaxPeers),
@@ -3676,6 +3647,14 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 	}
 	s.connManager = cmgr
 
+	s.banManager = connmgr.NewBanManager(&connmgr.BanManagerConfig{
+		DisableBanning: cfg.DisableBanning,
+		BanThreshold:   cfg.BanThreshold,
+		MaxPeers:       cfg.MaxPeers,
+		BanPeer:        s.banPeer,
+		WhiteList:      cfg.whitelists,
+	})
+
 	// Start up persistent peers.
 	permanentPeers := cfg.ConnectPeers
 	if len(permanentPeers) == 0 {
@@ -3743,6 +3722,7 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 			UserAgentVersion:     userAgentVersion,
 			LogManager:           &rpcLogManager{},
 			FiltererV2:           s.chain,
+			BanMgr:               s.banManager,
 		}
 		if s.existsAddrIndex != nil {
 			rpcsConfig.ExistsAddresser = s.existsAddrIndex
@@ -3914,7 +3894,7 @@ func addLocalAddress(addrMgr *addrmgr.AddrManager, addr string, services wire.Se
 			}
 
 			netAddr := wire.NewNetAddressIPPort(ifaceIP, uint16(port), services)
-			addrMgr.AddLocalAddress(netAddr, addrmgr.BoundPrio)
+			_ = addrMgr.AddLocalAddress(netAddr, addrmgr.BoundPrio)
 		}
 	} else {
 		netAddr, err := addrMgr.HostToNetAddress(host, uint16(port), services)
@@ -3922,34 +3902,8 @@ func addLocalAddress(addrMgr *addrmgr.AddrManager, addr string, services wire.Se
 			return err
 		}
 
-		addrMgr.AddLocalAddress(netAddr, addrmgr.BoundPrio)
+		_ = addrMgr.AddLocalAddress(netAddr, addrmgr.BoundPrio)
 	}
 
 	return nil
-}
-
-// isWhitelisted returns whether the IP address is included in the whitelisted
-// networks and IPs.
-func isWhitelisted(addr net.Addr) bool {
-	if len(cfg.whitelists) == 0 {
-		return false
-	}
-
-	host, _, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		srvrLog.Warnf("Unable to SplitHostPort on '%s': %v", addr, err)
-		return false
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		srvrLog.Warnf("Unable to parse IP '%s'", addr)
-		return false
-	}
-
-	for _, ipnet := range cfg.whitelists {
-		if ipnet.Contains(ip) {
-			return true
-		}
-	}
-	return false
 }

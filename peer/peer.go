@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2016-2020 The Decred developers
+// Copyright (c) 2016-2021 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -444,6 +444,7 @@ type Peer struct {
 	sendHeadersPreferred bool   // peer sent a sendheaders message
 	versionSent          bool
 	verAckReceived       bool
+	isWhitelisted        bool
 
 	knownInventory     lru.Cache
 	prevGetBlocksMtx   sync.Mutex
@@ -482,6 +483,20 @@ type Peer struct {
 // This function is safe for concurrent access.
 func (p *Peer) String() string {
 	return fmt.Sprintf("%s (%s)", p.addr, directionString(p.inbound))
+}
+
+// SetIsWhitelisted updates the whitelisted status of the peer.
+func (p *Peer) SetIsWhitelisted(status bool) {
+	p.flagsMtx.Lock()
+	p.isWhitelisted = status
+	p.flagsMtx.Unlock()
+}
+
+// IsWhitelisted returns the whitelisted status of the peer.
+func (p *Peer) IsWhitelisted() bool {
+	p.flagsMtx.Lock()
+	defer p.flagsMtx.Unlock()
+	return p.isWhitelisted
 }
 
 // UpdateLastBlockHeight updates the last known block for the peer.
