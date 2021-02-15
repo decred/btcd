@@ -686,7 +686,10 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
 	remoteAddr := sp.NA()
 	addrManager := sp.server.addrManager
 	if !cfg.SimNet && !cfg.RegNet && !isInbound {
-		addrManager.SetServices(remoteAddr, msg.Services)
+		err := addrManager.SetServices(remoteAddr, msg.Services)
+		if err != nil {
+			srvrLog.Errorf("Setting services for address failed: %v", err)
+		}
 	}
 
 	// Reject peers that have a protocol version that is too old.
@@ -735,7 +738,10 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
 		}
 
 		// Mark the address as a known good address.
-		addrManager.Good(remoteAddr)
+		err := addrManager.Good(remoteAddr)
+		if err != nil {
+			srvrLog.Errorf("Marking address as good failed: %v", err)
+		}
 	}
 
 	sp.peerNaMtx.Lock()
@@ -1796,7 +1802,10 @@ func (s *server) handleDonePeerMsg(state *peerState, sp *serverPeer) {
 	// Update the address' last seen time if the peer has acknowledged
 	// our version and has sent us its version as well.
 	if sp.VerAckReceived() && sp.VersionKnown() && sp.NA() != nil {
-		s.addrManager.Connected(sp.NA())
+		err := s.addrManager.Connected(sp.NA())
+		if err != nil {
+			srvrLog.Debugf("Marking address as connected failed: %v", err)
+		}
 	}
 
 	// If we get here it means that either we didn't know about the peer
@@ -2166,7 +2175,10 @@ func (s *server) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) {
 	sp.isWhitelisted = isWhitelisted(conn.RemoteAddr())
 	sp.AssociateConnection(conn)
 	go s.peerDoneHandler(sp)
-	s.addrManager.Attempt(sp.NA())
+	err = s.addrManager.Attempt(sp.NA())
+	if err != nil {
+		srvrLog.Debugf("Marking address as attempted failed: %v", err)
+	}
 }
 
 // peerDoneHandler handles peer disconnects by notifying the server that it's
