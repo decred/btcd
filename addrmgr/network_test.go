@@ -133,7 +133,7 @@ func TestIPTypes(t *testing.T) {
 			t.Errorf("IsValid %s\n got: %v want: %v", test.ip, rv, test.valid)
 		}
 
-		if rv := IsRoutable(test.ip); rv != test.routable {
+		if rv := isRoutable(test.ip); rv != test.routable {
 			t.Errorf("IsRoutable %s\n got: %v want: %v", test.ip, rv, test.routable)
 		}
 	}

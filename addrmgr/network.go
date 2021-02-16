@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2021 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -249,7 +249,7 @@ func isValid(netIP net.IP) bool {
 // IsRoutable returns whether or not the passed address is routable over
 // the public internet.  This is true as long as the address is valid and is not
 // in any reserved ranges.
-func IsRoutable(netIP net.IP) bool {
+func isRoutable(netIP net.IP) bool {
 	return isValid(netIP) && !(isRFC1918(netIP) || isRFC2544(netIP) ||
 		isRFC3927(netIP) || isRFC4862(netIP) || isRFC3849(netIP) ||
 		isRFC4843(netIP) || isRFC5737(netIP) || isRFC6598(netIP) ||
@@ -265,7 +265,7 @@ func GroupKey(netIP net.IP) string {
 	if isLocal(netIP) {
 		return "local"
 	}
-	if !IsRoutable(netIP) {
+	if !isRoutable(netIP) {
 		return "unroutable"
 	}
 	if isIPv4(netIP) {
