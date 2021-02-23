@@ -318,7 +318,7 @@ func TestGood(t *testing.T) {
 		t.Errorf("Number of addresses is too many: %d vs %d", numAddrs, addrsToAdd)
 	}
 
-	numCache := len(n.AddressCache())
+	numCache := len(n.AddressCache(TORv2Address))
 	if numCache >= numAddrs/4 {
 		t.Errorf("Number of addresses in cache: got %d, want %d", numCache, numAddrs/4)
 	}
@@ -522,7 +522,7 @@ func TestGetBestLocalAddress(t *testing.T) {
 
 	// Test against default when there's no address
 	for x, test := range tests {
-		got := amgr.GetBestLocalAddress(test.remoteAddr)
+		got := amgr.GetBestLocalAddress(test.remoteAddr, IPv6Address)
 		if !reflect.DeepEqual(test.want0.IP, got.IP) {
 			t.Errorf("TestGetBestLocalAddress test1 #%d failed for remote address %s: want %s got %s",
 				x, test.remoteAddr.IP, test.want1.IP, got.IP)
@@ -536,7 +536,7 @@ func TestGetBestLocalAddress(t *testing.T) {
 
 	// Test against want1
 	for x, test := range tests {
-		got := amgr.GetBestLocalAddress(test.remoteAddr)
+		got := amgr.GetBestLocalAddress(test.remoteAddr, IPv6Address)
 		if !reflect.DeepEqual(test.want1.IP, got.IP) {
 			t.Errorf("TestGetBestLocalAddress test1 #%d failed for remote address %s: want %s got %s",
 				x, test.remoteAddr.IP, test.want1.IP, got.IP)
@@ -550,7 +550,7 @@ func TestGetBestLocalAddress(t *testing.T) {
 
 	// Test against want2
 	for x, test := range tests {
-		got := amgr.GetBestLocalAddress(test.remoteAddr)
+		got := amgr.GetBestLocalAddress(test.remoteAddr, IPv6Address)
 		if !reflect.DeepEqual(test.want2.IP, got.IP) {
 			t.Errorf("TestGetBestLocalAddress test2 #%d failed for remote address %s: want %s got %s",
 				x, test.remoteAddr.IP, test.want2.IP, got.IP)

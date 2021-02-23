@@ -277,7 +277,7 @@ func readElement(r io.Reader, element interface{}) error {
 		*e = int64Time(time.Unix(int64(rv), 0))
 		return nil
 
-	// Message header checksum.
+	// Message header checksum or IPv4 address.
 	case *[4]byte:
 		_, err := io.ReadFull(r, e[:])
 		if err != nil {
@@ -286,6 +286,13 @@ func readElement(r io.Reader, element interface{}) error {
 		return nil
 
 	case *[6]byte:
+		_, err := io.ReadFull(r, e[:])
+		if err != nil {
+			return err
+		}
+		return nil
+
+	case *[10]byte:
 		_, err := io.ReadFull(r, e[:])
 		if err != nil {
 			return err
@@ -417,8 +424,15 @@ func writeElement(w io.Writer, element interface{}) error {
 		}
 		return nil
 
-	// Message header checksum.
+		// Message header checksum or IPv4 address.
 	case [4]byte:
+		_, err := w.Write(e[:])
+		if err != nil {
+			return err
+		}
+		return nil
+
+	case [10]byte:
 		_, err := w.Write(e[:])
 		if err != nil {
 			return err

@@ -675,10 +675,10 @@ func (a *AddrManager) NeedMoreAddresses() bool {
 }
 
 // AddressCache returns a randomized subset of all addresses known to the
-// address manager.
+// address manager with a network address type not newer than the provided type.
 //
 // This function is safe for concurrent access.
-func (a *AddrManager) AddressCache() []*NetAddress {
+func (a *AddrManager) AddressCache(maxAddressType NetAddressType) []*NetAddress {
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 
@@ -691,6 +691,10 @@ func (a *AddrManager) AddressCache() []*NetAddress {
 	allAddr := make([]*NetAddress, 0, addrLen)
 	// Iteration order is undefined here, but we randomize it anyway.
 	for _, v := range a.addrIndex {
+		// Skip address types newer than what is requested by the caller.
+		if v.na.Type > maxAddressType {
+			continue
+		}
 		// Skip low quality addresses.
 		if v.isBad() {
 			continue
@@ -1153,7 +1157,7 @@ func getReachabilityFrom(localAddr, remoteAddr *NetAddress) NetAddressReach {
 // for the given remote address.
 //
 // This function is safe for concurrent access.
-func (a *AddrManager) GetBestLocalAddress(remoteAddr *NetAddress) *NetAddress {
+func (a *AddrManager) GetBestLocalAddress(remoteAddr *NetAddress, maxAddressType NetAddressType) *NetAddress {
 	a.lamtx.Lock()
 	defer a.lamtx.Unlock()
 
@@ -1161,6 +1165,11 @@ func (a *AddrManager) GetBestLocalAddress(remoteAddr *NetAddress) *NetAddress {
 	var bestscore AddressPriority
 	var bestAddress *NetAddress
 	for _, la := range a.localAddresses {
+		// Do not return address types newer than what was requested by the
+		// caller.
+		if la.na.Type > maxAddressType {
+			continue
+		}
 		reach := getReachabilityFrom(la.na, remoteAddr)
 		if reach > bestreach ||
 			(reach == bestreach && la.score > bestscore) {

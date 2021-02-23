@@ -7,58 +7,25 @@ package wire
 
 import (
 	"bytes"
-	"errors"
 	"reflect"
 	"testing"
 
 	"github.com/davecgh/go-spew/spew"
 )
 
-// TestGetAddrLatest tests the MsgGetAddr API against the latest protocol
-// version to ensure it is no longer valid.
-func TestGetAddrLatest(t *testing.T) {
-	pver := ProtocolVersion
-	msg := NewMsgGetAddr()
-
-	// Ensure max payload is expected value.
-	wantPayload := uint32(0)
-	maxPayload := msg.MaxPayloadLength(pver)
-	if maxPayload != wantPayload {
-		t.Errorf("MaxPayloadLength: wrong max payload length for protocol "+
-			"version %d - got %v, want %v", pver, maxPayload, wantPayload)
-	}
-
-	// Ensure encode fails with the latest protocol version.
-	var buf bytes.Buffer
-	err := msg.BtcEncode(&buf, pver)
-	if !errors.Is(err, ErrMsgInvalidForPVer) {
-		t.Errorf("MsgGetAddr encode unexpected err -- got %v, want %v", err,
-			ErrMsgInvalidForPVer)
-	}
-
-	// Ensure decode fails with the latest protocol version.
-	var readMsg MsgGetAddr
-	err = readMsg.BtcDecode(&buf, pver)
-	if !errors.Is(err, ErrMsgInvalidForPVer) {
-		t.Errorf("MsgGetAddr decode unexpected err -- got %v, want %v", err,
-			ErrMsgInvalidForPVer)
-	}
-}
-
 // TestGetAddr tests the MsgGetAddr API.
-func TestGetAddr(t *testing.T) {
+func TestGetAddrV2(t *testing.T) {
 	pver := ProtocolVersion
 
 	// Ensure the command is expected value.
-	wantCmd := "getaddr"
-	msg := NewMsgGetAddr()
+	wantCmd := "getaddrv2"
+	msg := NewMsgGetAddrV2()
 	if cmd := msg.Command(); cmd != wantCmd {
 		t.Errorf("NewMsgGetAddr: wrong command - got %v want %v",
 			cmd, wantCmd)
 	}
 
 	// Ensure max payload is expected value for latest protocol version.
-	// Num addresses (varInt) + max allowed addresses.
 	wantPayload := uint32(0)
 	maxPayload := msg.MaxPayloadLength(pver)
 	if maxPayload != wantPayload {
@@ -75,10 +42,9 @@ func TestGetAddr(t *testing.T) {
 	}
 }
 
-// TestGetAddrWireLastSupported tests the MsgGetAddr wire encode and decode for
-// the last supported protocol versions.
-func TestGetAddrWireLastSupported(t *testing.T) {
-	const lastSupportedProtocolVersion = AddrV2Version - 1
+// TestGetAddrV2Wire tests the MsgGetAddr wire encode and decode for various
+// protocol versions.
+func TestGetAddrV2Wire(t *testing.T) {
 	msgGetAddr := NewMsgGetAddr()
 	msgGetAddrEncoded := []byte{}
 
@@ -88,12 +54,12 @@ func TestGetAddrWireLastSupported(t *testing.T) {
 		buf  []byte      // Wire encoding
 		pver uint32      // Protocol version for wire encoding
 	}{
-		// Last supported protocol version.
+		// Latest protocol version.
 		{
 			msgGetAddr,
 			msgGetAddr,
 			msgGetAddrEncoded,
-			lastSupportedProtocolVersion,
+			AddrV2Version - 1,
 		},
 	}
 

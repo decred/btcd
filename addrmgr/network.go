@@ -118,7 +118,7 @@ func isOnionCatTor(netIP net.IP) bool {
 
 // NetAddressType is used to indicate which network a network address belongs
 // to.
-type NetAddressType int
+type NetAddressType uint8
 
 const (
 	UnknownAddressType NetAddressType = iota

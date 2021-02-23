@@ -104,16 +104,16 @@ of a most-recently used algorithm.
 Message Sending Helper Functions
 
 In addition to the bare QueueMessage function previously described, the
-PushAddrMsg, PushGetBlocksMsg, and PushGetHeadersMsg functions are provided as a
-convenience.  While it is of course possible to create and send these messages
-manually via QueueMessage, these helper functions provided additional useful
-functionality that is typically desired.
+PushAddrMsg, PushAddrMsgV2, PushGetBlocksMsg, and PushGetHeadersMsg functions
+are provided as a convenience.  While it is of course possible to create and
+send these messages manually via QueueMessage, these helper functions provide
+additional useful functionality that is typically desired.
 
-For example, the PushAddrMsg function automatically limits the addresses to the
-maximum number allowed by the message and randomizes the chosen addresses when
-there are too many.  This allows the caller to simply provide a slice of known
-addresses, such as that returned by the addrmgr package, without having to worry
-about the details.
+For example, the PushAddrMsg and PushAddrMsgV2 functions automatically limit the
+addresses to the maximum number allowed by the message and randomizes the chosen
+addresses when there are too many.  This allows the caller to simply provide a
+slice of known addresses, such as that returned by the addrmgr package, without
+having to worry about the details.
 
 Finally, the PushGetBlocksMsg and PushGetHeadersMsg functions will construct
 proper messages using a block locator and ignore back to back duplicate
