@@ -28,7 +28,7 @@ import (
 
 const (
 	// MaxProtocolVersion is the max protocol version the peer supports.
-	MaxProtocolVersion = wire.InitStateVersion
+	MaxProtocolVersion = wire.AddrV2Version
 
 	// outputBufferSize is the number of elements the output channels use.
 	outputBufferSize = 5000
@@ -97,8 +97,14 @@ type MessageListeners struct {
 	// OnGetAddr is invoked when a peer receives a getaddr wire message.
 	OnGetAddr func(p *Peer, msg *wire.MsgGetAddr)
 
+	// OnGetAddrV2 is invoked when a peer receives a getaddrV2 wire message.
+	OnGetAddrV2 func(p *Peer, msg *wire.MsgGetAddrV2)
+
 	// OnAddr is invoked when a peer receives an addr wire message.
 	OnAddr func(p *Peer, msg *wire.MsgAddr)
+
+	// OnAddrV2 is invoked when a peer receives an addrV2 wire message.
+	OnAddrV2 func(p *Peer, msg *wire.MsgAddrV2)
 
 	// OnPing is invoked when a peer receives a ping wire message.
 	OnPing func(p *Peer, msg *wire.MsgPing)
@@ -836,6 +842,41 @@ func (p *Peer) PushAddrMsg(addresses []*wire.NetAddress) ([]*wire.NetAddress, er
 	return msg.AddrList, nil
 }
 
+// PushAddrV2Msg sends an addrv2 message to the connected peer using the
+// provided addresses.  This function is useful over manually sending the
+// message via QueueMessage since it automatically limits the addresses to the
+// maximum number allowed by the message and randomizes the chosen addresses
+// when there are too many.  It returns the addresses that were actually sent
+// and no message will be sent if there are no entries in the provided addresses
+// slice.
+//
+// This function is safe for concurrent access.
+func (p *Peer) PushAddrV2Msg(addresses []*addrmgr.NetAddress) ([]*addrmgr.NetAddress, error) {
+	// Nothing to send.
+	if len(addresses) == 0 {
+		return nil, nil
+	}
+
+	msg := wire.NewMsgAddrV2()
+	msg.AddrList = make([]*addrmgr.NetAddress, len(addresses))
+	copy(msg.AddrList, addresses)
+
+	// Randomize the addresses sent if there are more than the maximum allowed.
+	if len(msg.AddrList) > wire.MaxAddrPerMsg {
+		// Shuffle the address list.
+		for i := range msg.AddrList {
+			j := rand.Intn(i + 1)
+			msg.AddrList[i], msg.AddrList[j] = msg.AddrList[j], msg.AddrList[i]
+		}
+
+		// Truncate it to the maximum size.
+		msg.AddrList = msg.AddrList[:wire.MaxAddrPerMsg]
+	}
+
+	p.QueueMessage(msg, nil)
+	return msg.AddrList, nil
+}
+
 // PushGetBlocksMsg sends a getblocks message for the provided block locator
 // and stop hash.  It will ignore back-to-back duplicate requests.
 //
@@ -1301,6 +1342,16 @@ out:
 			p.flagsMtx.Unlock()
 			if p.cfg.Listeners.OnVerAck != nil {
 				p.cfg.Listeners.OnVerAck(p, msg)
+			}
+
+		case *wire.MsgGetAddrV2:
+			if p.cfg.Listeners.OnGetAddrV2 != nil {
+				p.cfg.Listeners.OnGetAddrV2(p, msg)
+			}
+
+		case *wire.MsgAddrV2:
+			if p.cfg.Listeners.OnAddrV2 != nil {
+				p.cfg.Listeners.OnAddrV2(p, msg)
 			}
 
 		case *wire.MsgGetAddr:

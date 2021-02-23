@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2020 The Decred developers
+// Copyright (c) 2015-2021 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -17,9 +17,40 @@ import (
 	"github.com/davecgh/go-spew/spew"
 )
 
+// TestAddrLatest tests the MsgAddr API against the latest protocol
+// version to ensure it is no longer valid.
+func TestAddrLatest(t *testing.T) {
+	pver := ProtocolVersion
+	msg := NewMsgAddr()
+
+	// Ensure max payload is expected value.
+	wantPayload := uint32(0)
+	maxPayload := msg.MaxPayloadLength(pver)
+	if maxPayload != wantPayload {
+		t.Errorf("MaxPayloadLength: wrong max payload length for protocol "+
+			"version %d - got %v, want %v", pver, maxPayload, wantPayload)
+	}
+
+	// Ensure encode fails with the latest protocol version.
+	var buf bytes.Buffer
+	err := msg.BtcEncode(&buf, pver)
+	if !errors.Is(err, ErrMsgInvalidForPVer) {
+		t.Errorf("MsgGetAddr encode unexpected err -- got %v, want %v", err,
+			ErrMsgInvalidForPVer)
+	}
+
+	// Ensure decode fails with the latest protocol version.
+	var readMsg MsgAddr
+	err = readMsg.BtcDecode(&buf, pver)
+	if !errors.Is(err, ErrMsgInvalidForPVer) {
+		t.Errorf("MsgGetAddr decode unexpected err -- got %v, want %v", err,
+			ErrMsgInvalidForPVer)
+	}
+}
+
 // TestAddr tests the MsgAddr API.
 func TestAddr(t *testing.T) {
-	pver := ProtocolVersion
+	pver := AddrV2Version - 1
 
 	// Ensure the command is expected value.
 	wantCmd := "addr"
@@ -29,7 +60,7 @@ func TestAddr(t *testing.T) {
 			cmd, wantCmd)
 	}
 
-	// Ensure max payload is expected value for latest protocol version.
+	// Ensure max payload is expected value for last supported protocol version.
 	// Num addresses (size of varInt for max address ) + max allowed addresses.
 	wantPayload := uint32(30003)
 	maxPayload := msg.MaxPayloadLength(pver)
@@ -86,8 +117,9 @@ func TestAddr(t *testing.T) {
 }
 
 // TestAddrWire tests the MsgAddr wire encode and decode for various numbers
-// of addresses and protocol versions.
+// of addresses up to the latest supported protocol version.
 func TestAddrWire(t *testing.T) {
+	const lastSupportedProtocolVersion = AddrV2Version - 1
 	// A couple of NetAddresses to use for testing.
 	na := &NetAddress{
 		Timestamp: time.Unix(0x495fab29, 0), // 2009-01-03 12:15:05 -0600 CST
@@ -132,20 +164,20 @@ func TestAddrWire(t *testing.T) {
 		buf  []byte   // Wire encoding
 		pver uint32   // Protocol version for wire encoding
 	}{
-		// Latest protocol version with no addresses.
+		// Last supported protocol version with no addresses.
 		{
 			noAddr,
 			noAddr,
 			noAddrEncoded,
-			ProtocolVersion,
+			lastSupportedProtocolVersion,
 		},
 
-		// Latest protocol version with multiple addresses.
+		// Last supported protocol version with multiple addresses.
 		{
 			multiAddr,
 			multiAddr,
 			multiAddrEncoded,
-			ProtocolVersion,
+			lastSupportedProtocolVersion,
 		},
 	}
 
@@ -183,7 +215,7 @@ func TestAddrWire(t *testing.T) {
 // TestAddrWireErrors performs negative tests against wire encode and decode
 // of MsgAddr to confirm error paths work correctly.
 func TestAddrWireErrors(t *testing.T) {
-	pver := ProtocolVersion
+	pver := AddrV2Version - 1
 
 	// A couple of NetAddresses to use for testing.
 	na := &NetAddress{

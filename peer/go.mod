@@ -18,4 +18,5 @@ replace (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 => ../dcrec/secp256k1
 	github.com/decred/dcrd/dcrutil/v4 => ../dcrutil
 	github.com/decred/dcrd/txscript/v4 => ../txscript
+	github.com/decred/dcrd/wire => ../wire
 )

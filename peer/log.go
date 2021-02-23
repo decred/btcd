@@ -43,6 +43,15 @@ func directionString(inbound bool) string {
 	return "outbound"
 }
 
+// pickNoun returns the singular or plural form of a noun depending on the
+// provided count.
+func pickNoun(n uint64, singular, plural string) string {
+	if n == 1 {
+		return singular
+	}
+	return plural
+}
+
 // formatLockTime returns a transaction lock time as a human-readable string.
 func formatLockTime(lockTime uint32) string {
 	// The lock time field of a transaction is either a block height at
@@ -119,8 +128,18 @@ func messageSummary(msg wire.Message) string {
 	case *wire.MsgGetAddr:
 		// No summary.
 
+	case *wire.MsgGetAddrV2:
+		// No summary.
+
 	case *wire.MsgAddr:
-		return fmt.Sprintf("%d addr", len(msg.AddrList))
+		addrLen := len(msg.AddrList)
+		addrNoun := pickNoun(uint64(addrLen), "addr", "addrs")
+		return fmt.Sprintf("%d %s", addrLen, addrNoun)
+
+	case *wire.MsgAddrV2:
+		addrLen := len(msg.AddrList)
+		addrNoun := pickNoun(uint64(addrLen), "addr", "addrs")
+		return fmt.Sprintf("%d %s", addrLen, addrNoun)
 
 	case *wire.MsgPing:
 		// No summary - perhaps add nonce.
