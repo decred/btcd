@@ -686,28 +686,6 @@ func (a *AddrManager) AddAddress(addr, srcAddr *wire.NetAddress) {
 	a.updateAddress(addr, srcAddr)
 }
 
-// addAddressByIP adds an address where we are given an ip:port and not a
-// wire.NetAddress.
-func (a *AddrManager) addAddressByIP(addrIP string) error {
-	// Split IP and port
-	addr, portStr, err := net.SplitHostPort(addrIP)
-	if err != nil {
-		return err
-	}
-	// Put it in wire.Netaddress
-	ip := net.ParseIP(addr)
-	if ip == nil {
-		return fmt.Errorf("invalid ip address %s", addr)
-	}
-	port, err := strconv.ParseUint(portStr, 10, 0)
-	if err != nil {
-		return fmt.Errorf("invalid port %s: %v", portStr, err)
-	}
-	na := wire.NewNetAddressIPPort(ip, uint16(port), 0)
-	a.AddAddress(na, na) // XXX use correct src address
-	return nil
-}
-
 // numAddresses returns the number of addresses known to the address manager.
 //
 // This function MUST be called with the address manager lock held (for reads).

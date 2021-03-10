@@ -108,80 +108,66 @@ func lookupFunc(host string) ([]net.IP, error) {
 	return nil, errors.New("not implemented")
 }
 
-func TestStartStop(t *testing.T) {
-	n := New("teststartstop", lookupFunc)
-	n.Start()
-	if err := n.Stop(); err != nil {
-		t.Fatalf("Address Manager failed to stop: %v", err)
-	}
+// addAddressByIP is a convenience function that adds an address from an ip
+// address string and port, rather than a wire.NetAddress.
+func (a *AddrManager) addAddressByIP(addr string, port uint16) {
+	ip := net.ParseIP(addr)
+	na := wire.NewNetAddressIPPort(ip, port, 0)
+	a.AddAddress(na, na)
 }
 
-func TestAddAddressByIP(t *testing.T) {
-	fmtErr := fmt.Errorf("")
-	addrErr := &net.AddrError{}
-	var tests = []struct {
-		addrIP string
-		err    error
-	}{
-		{
-			someIP + ":8333",
-			nil,
-		},
-		{
-			someIP,
-			addrErr,
-		},
-		{
-			someIP[:12] + ":8333",
-			fmtErr,
-		},
-		{
-			someIP + ":abcd",
-			fmtErr,
-		},
-	}
-
-	dir, err := ioutil.TempDir("", "testaddressbyip")
+// TestStartStop tests the behavior of the address manager when it is started
+// and stopped.
+func TestStartStop(t *testing.T) {
+	dir, err := ioutil.TempDir("", "teststartstop")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
+
+	// Ensure the peers file does not exist before starting the address manager.
+	peersFile := filepath.Join(dir, peersFilename)
+	if _, err := os.Stat(peersFile); !os.IsNotExist(err) {
+		t.Fatalf("peers file exists though it should not: %s", peersFile)
+	}
+
 	amgr := New(dir, nil)
 	amgr.Start()
-	for i, test := range tests {
-		err := amgr.addAddressByIP(test.addrIP)
-		if test.err != nil && err == nil {
-			t.Errorf("TestGood test %d failed expected an error and got none", i)
-			continue
-		}
-		if test.err == nil && err != nil {
-			t.Errorf("TestGood test %d failed expected no error and got one", i)
-			continue
-		}
-		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
-			t.Errorf("TestGood test %d failed got %v, want %v", i,
-				reflect.TypeOf(err), reflect.TypeOf(test.err))
-			continue
-		}
-	}
+
+	// Add single network address to the address manager.
+	amgr.addAddressByIP(someIP, 8333)
+
+	// Stop the address manager to force the known addresses to be flushed
+	// to the peers file.
 	if err := amgr.Stop(); err != nil {
-		t.Fatalf("Address Manager failed to stop: %v", err)
+		t.Fatalf("address manager failed to stop: %v", err)
 	}
 
-	// make sure the peers file has been written to.
-	peersFile := filepath.Join(dir, peersFilename)
+	// Verify that the the peers file has been written to.
 	if _, err := os.Stat(peersFile); err != nil {
-		t.Fatalf("Peers file does not exist: %s", peersFile)
+		t.Fatalf("peers file does not exist: %s", peersFile)
 	}
 
-	// start address manager again to read peers file
+	// Start a new address manager, which initializes it from the peers file.
 	amgr = New(dir, nil)
 	amgr.Start()
-	if ka := amgr.GetAddress(); ka == nil {
-		t.Fatal("Address Manager should contain known address")
+
+	knownAddress := amgr.GetAddress()
+	if knownAddress == nil {
+		t.Fatal("address manager should contain known address")
 	}
+
+	// Verify that the known address matches what was added to the address
+	// manager previously.
+	wantNetAddrKey := someIP + ":8333"
+	gotNetAddrKey := NetAddressKey(knownAddress.na)
+	if gotNetAddrKey != wantNetAddrKey {
+		t.Fatal("address manager does not contain expected address -- "+
+			"got %v, want %v", gotNetAddrKey, wantNetAddrKey)
+	}
+
 	if err := amgr.Stop(); err != nil {
-		t.Fatalf("Address Manager failed to stop: %v", err)
+		t.Fatalf("address manager failed to stop: %v", err)
 	}
 }
 
@@ -312,10 +298,7 @@ func TestAttempt(t *testing.T) {
 	n := New("testattempt", lookupFunc)
 
 	// Add a new address and get it
-	err := n.addAddressByIP(someIP + ":8333")
-	if err != nil {
-		t.Fatalf("Adding address failed: %v", err)
-	}
+	n.addAddressByIP(someIP, 8333)
 	ka := n.GetAddress()
 
 	if !ka.LastAttempt().IsZero() {
@@ -323,7 +306,7 @@ func TestAttempt(t *testing.T) {
 	}
 
 	na := ka.NetAddress()
-	err = n.Attempt(na)
+	err := n.Attempt(na)
 	if err != nil {
 		t.Fatalf("Marking address as attempted failed -- %v", err)
 	}
@@ -346,16 +329,13 @@ func TestConnected(t *testing.T) {
 	n := New("testconnected", lookupFunc)
 
 	// Add a new address and get it
-	err := n.addAddressByIP(someIP + ":8333")
-	if err != nil {
-		t.Fatalf("Adding address failed: %v", err)
-	}
+	n.addAddressByIP(someIP, 8333)
 	ka := n.GetAddress()
 	na := ka.NetAddress()
 	// make it an hour ago
 	na.Timestamp = time.Unix(time.Now().Add(time.Hour*-1).Unix(), 0)
 
-	err = n.Connected(na)
+	err := n.Connected(na)
 	if err != nil {
 		t.Fatalf("Marking address as connected failed - %v", err)
 	}
@@ -537,10 +517,7 @@ func TestGetAddress(t *testing.T) {
 	}
 
 	// Add a new address and get it
-	err := n.addAddressByIP(someIP + ":8333")
-	if err != nil {
-		t.Fatalf("Adding address failed: %v", err)
-	}
+	n.addAddressByIP(someIP, 8333)
 	ka := n.GetAddress()
 	if ka == nil {
 		t.Fatal("Did not get an address where there is one in the pool")
@@ -552,7 +529,7 @@ func TestGetAddress(t *testing.T) {
 	}
 
 	// Mark this as a good address and get it
-	err = n.Good(ka.NetAddress())
+	err := n.Good(ka.NetAddress())
 	if err != nil {
 		t.Fatalf("Marking address as good failed: %v", err)
 	}
