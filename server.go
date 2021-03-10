@@ -724,7 +724,7 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
 		if !cfg.DisableListen && sp.server.syncManager.IsCurrent() {
 			// Get address that best matches.
 			lna := addrManager.GetBestLocalAddress(remoteAddr)
-			if addrmgr.IsRoutable(lna) {
+			if addrmgr.IsRoutable(lna.IP) {
 				// Filter addresses the peer already knows about.
 				addresses := []*wire.NetAddress{lna}
 				sp.pushAddrMsg(addresses)
@@ -1700,7 +1700,7 @@ func (s *server) handleAddPeerMsg(state *peerState, sp *serverPeer) bool {
 			}
 		}
 	} else {
-		state.outboundGroups[addrmgr.GroupKey(sp.NA())]++
+		state.outboundGroups[addrmgr.GroupKey(sp.NA().IP)]++
 		if sp.persistent {
 			state.persistentPeers[sp.ID()] = sp
 		} else {
@@ -1785,7 +1785,7 @@ func (s *server) handleDonePeerMsg(state *peerState, sp *serverPeer) {
 	}
 	if _, ok := list[sp.ID()]; ok {
 		if !sp.Inbound() && sp.VersionKnown() {
-			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
+			state.outboundGroups[addrmgr.GroupKey(sp.NA().IP)]--
 		}
 		if !sp.Inbound() && sp.connReq != nil {
 			s.connManager.Disconnect(sp.connReq.ID())
@@ -2000,7 +2000,7 @@ func (s *server) handleQuery(state *peerState, querymsg interface{}) {
 		found := disconnectPeer(state.persistentPeers, msg.cmp, func(sp *serverPeer) {
 			// Keep group counts ok since we remove from
 			// the list now.
-			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
+			state.outboundGroups[addrmgr.GroupKey(sp.NA().IP)]--
 
 			peerLog.Debugf("Removing persistent peer %s:%d (reqid %d)",
 				sp.NA().IP, sp.NA().Port, sp.connReq.ID())
@@ -2055,7 +2055,7 @@ func (s *server) handleQuery(state *peerState, querymsg interface{}) {
 		found = disconnectPeer(state.outboundPeers, msg.cmp, func(sp *serverPeer) {
 			// Keep group counts ok since we remove from
 			// the list now.
-			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
+			state.outboundGroups[addrmgr.GroupKey(sp.NA().IP)]--
 		})
 		if found {
 			// If there are multiple outbound connections to the same
@@ -2063,7 +2063,7 @@ func (s *server) handleQuery(state *peerState, querymsg interface{}) {
 			// peers are found.
 			for found {
 				found = disconnectPeer(state.outboundPeers, msg.cmp, func(sp *serverPeer) {
-					state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
+					state.outboundGroups[addrmgr.GroupKey(sp.NA().IP)]--
 				})
 			}
 			msg.reply <- nil
@@ -3606,7 +3606,7 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 				// in the same group so that we are not connecting
 				// to the same network segment at the expense of
 				// others.
-				key := addrmgr.GroupKey(addr.NetAddress())
+				key := addrmgr.GroupKey(addr.NetAddress().IP)
 				if s.OutboundGroupCount(key) != 0 {
 					continue
 				}

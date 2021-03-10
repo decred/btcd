@@ -238,7 +238,7 @@ const (
 func (a *AddrManager) updateAddress(netAddr, srcAddr *wire.NetAddress) {
 	// Filter out non-routable addresses. Note that non-routable
 	// also includes invalid and local addresses.
-	if !IsRoutable(netAddr) {
+	if !IsRoutable(netAddr.IP) {
 		return
 	}
 
@@ -374,11 +374,11 @@ func (a *AddrManager) getOldestAddressIndex(bucket int) int {
 // IPs using key as a seed.
 // This is used to as a mitigation against eclipse attacks described in
 // "Eclipse Attacks on Bitcoin’s Peer-to-Peer Network" by Heilman et al.
-func getNewBucket(key [32]byte, netAddr, srcAddr *wire.NetAddress) int {
+func getNewBucket(key [32]byte, netAddrIP, srcAddrIP net.IP) int {
 	data1 := []byte{}
 	data1 = append(data1, key[:]...)
-	data1 = append(data1, []byte(GroupKey(netAddr))...)
-	data1 = append(data1, []byte(GroupKey(srcAddr))...)
+	data1 = append(data1, []byte(GroupKey(netAddrIP))...)
+	data1 = append(data1, []byte(GroupKey(srcAddrIP))...)
 	hash1 := chainhash.HashB(data1)
 	hash64 := binary.LittleEndian.Uint64(hash1)
 	hash64 %= newBucketsPerGroup
@@ -386,7 +386,7 @@ func getNewBucket(key [32]byte, netAddr, srcAddr *wire.NetAddress) int {
 	binary.LittleEndian.PutUint64(hashbuf[:], hash64)
 	data2 := []byte{}
 	data2 = append(data2, key[:]...)
-	data2 = append(data2, GroupKey(srcAddr)...)
+	data2 = append(data2, GroupKey(srcAddrIP)...)
 	data2 = append(data2, hashbuf[:]...)
 
 	hash2 := chainhash.HashB(data2)
@@ -406,7 +406,7 @@ func getTriedBucket(key [32]byte, netAddr *wire.NetAddress) int {
 	binary.LittleEndian.PutUint64(hashbuf[:], hash64)
 	data2 := []byte{}
 	data2 = append(data2, key[:]...)
-	data2 = append(data2, GroupKey(netAddr)...)
+	data2 = append(data2, GroupKey(netAddr.IP)...)
 	data2 = append(data2, hashbuf[:]...)
 
 	hash2 := chainhash.HashB(data2)
@@ -767,7 +767,7 @@ func (a *AddrManager) reset() {
 	}
 	a.addrChanged = true
 	a.getNewBucket = func(netAddr, srcAddr *wire.NetAddress) int {
-		return getNewBucket(a.key, netAddr, srcAddr)
+		return getNewBucket(a.key, netAddr.IP, srcAddr.IP)
 	}
 	a.getTriedBucket = func(netAddr *wire.NetAddress) int {
 		return getTriedBucket(a.key, netAddr)
@@ -813,7 +813,7 @@ func (a *AddrManager) HostToNetAddress(host string, port uint16, services wire.S
 // ip is in the range used for TORv2 addresses then it will be transformed into
 // the respective .onion address.
 func ipString(na *wire.NetAddress) string {
-	if isOnionCatTor(na) {
+	if isOnionCatTor(na.IP) {
 		// We know now that na.IP is long enough.
 		base32 := base32.StdEncoding.EncodeToString(na.IP[6:])
 		return strings.ToLower(base32) + ".onion"
@@ -1084,7 +1084,7 @@ func (a *AddrManager) SetServices(addr *wire.NetAddress, services wire.ServiceFl
 //
 // This function is safe for concurrent access.
 func (a *AddrManager) AddLocalAddress(na *wire.NetAddress, priority AddressPriority) error {
-	if !IsRoutable(na) {
+	if !IsRoutable(na.IP) {
 		return fmt.Errorf("address %s is not routable", ipString(na))
 	}
 
@@ -1169,40 +1169,40 @@ const (
 //
 // This function is safe for concurrent access.
 func getReachabilityFrom(localAddr, remoteAddr *wire.NetAddress) int {
-	if !IsRoutable(remoteAddr) {
+	if !IsRoutable(remoteAddr.IP) {
 		return Unreachable
 	}
 
-	if isOnionCatTor(remoteAddr) {
-		if isOnionCatTor(localAddr) {
+	if isOnionCatTor(remoteAddr.IP) {
+		if isOnionCatTor(localAddr.IP) {
 			return Private
 		}
 
-		if IsRoutable(localAddr) && isIPv4(localAddr) {
+		if IsRoutable(localAddr.IP) && isIPv4(localAddr.IP) {
 			return Ipv4
 		}
 
 		return Default
 	}
 
-	if isRFC4380(remoteAddr) {
-		if !IsRoutable(localAddr) {
+	if isRFC4380(remoteAddr.IP) {
+		if !IsRoutable(localAddr.IP) {
 			return Default
 		}
 
-		if isRFC4380(localAddr) {
+		if isRFC4380(localAddr.IP) {
 			return Teredo
 		}
 
-		if isIPv4(localAddr) {
+		if isIPv4(localAddr.IP) {
 			return Ipv4
 		}
 
 		return Ipv6Weak
 	}
 
-	if isIPv4(remoteAddr) {
-		if IsRoutable(localAddr) && isIPv4(localAddr) {
+	if isIPv4(remoteAddr.IP) {
+		if IsRoutable(localAddr.IP) && isIPv4(localAddr.IP) {
 			return Ipv4
 		}
 		return Unreachable
@@ -1211,19 +1211,19 @@ func getReachabilityFrom(localAddr, remoteAddr *wire.NetAddress) int {
 	/* ipv6 */
 	var tunnelled bool
 	// Is our v6 tunnelled?
-	if isRFC3964(localAddr) || isRFC6052(localAddr) || isRFC6145(localAddr) {
+	if isRFC3964(localAddr.IP) || isRFC6052(localAddr.IP) || isRFC6145(localAddr.IP) {
 		tunnelled = true
 	}
 
-	if !IsRoutable(localAddr) {
+	if !IsRoutable(localAddr.IP) {
 		return Default
 	}
 
-	if isRFC4380(localAddr) {
+	if isRFC4380(localAddr.IP) {
 		return Teredo
 	}
 
-	if isIPv4(localAddr) {
+	if isIPv4(localAddr.IP) {
 		return Ipv4
 	}
 
@@ -1264,7 +1264,7 @@ func (a *AddrManager) GetBestLocalAddress(remoteAddr *wire.NetAddress) *wire.Net
 
 		// Send something unroutable if nothing suitable.
 		var ip net.IP
-		if !isIPv4(remoteAddr) && !isOnionCatTor(remoteAddr) {
+		if !isIPv4(remoteAddr.IP) && !isOnionCatTor(remoteAddr.IP) {
 			ip = net.IPv6zero
 		} else {
 			ip = net.IPv4zero
@@ -1281,7 +1281,7 @@ func (a *AddrManager) GetBestLocalAddress(remoteAddr *wire.NetAddress) *wire.Net
 //
 // This function is safe for concurrent access.
 func (a *AddrManager) ValidatePeerNa(localAddr, remoteAddr *wire.NetAddress) (bool, int) {
-	net := getNetwork(localAddr)
+	net := getNetwork(localAddr.IP)
 	reach := getReachabilityFrom(localAddr, remoteAddr)
 	valid := (net == IPv4Address && reach == Ipv4) || (net == IPv6Address &&
 		(reach == Ipv6Weak || reach == Ipv6Strong || reach == Teredo))
