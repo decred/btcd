@@ -1138,14 +1138,17 @@ func (a *AddrManager) LocalAddresses() []LocalAddr {
 	return addrs
 }
 
+// NetAddressReach represents the connection state between two addresses.
+type NetAddressReach int
+
 const (
 	// Unreachable represents a publicly unreachable connection state
 	// between two addresses.
-	Unreachable = 0
+	Unreachable NetAddressReach = 0
 
 	// Default represents the default connection state between
 	// two addresses.
-	Default = iota
+	Default NetAddressReach = iota
 
 	// Teredo represents a connection state between two RFC4380 addresses.
 	Teredo
@@ -1168,7 +1171,7 @@ const (
 // address to the provided remote address.
 //
 // This function is safe for concurrent access.
-func getReachabilityFrom(localAddr, remoteAddr *wire.NetAddress) int {
+func getReachabilityFrom(localAddr, remoteAddr *wire.NetAddress) NetAddressReach {
 	if !IsRoutable(remoteAddr.IP) {
 		return Unreachable
 	}
@@ -1243,7 +1246,7 @@ func (a *AddrManager) GetBestLocalAddress(remoteAddr *wire.NetAddress) *wire.Net
 	a.lamtx.Lock()
 	defer a.lamtx.Unlock()
 
-	bestreach := 0
+	bestreach := Default
 	var bestscore AddressPriority
 	var bestAddress *wire.NetAddress
 	for _, la := range a.localAddresses {
@@ -1280,7 +1283,7 @@ func (a *AddrManager) GetBestLocalAddress(remoteAddr *wire.NetAddress) *wire.Net
 // from the peer that suggested it.
 //
 // This function is safe for concurrent access.
-func (a *AddrManager) ValidatePeerNa(localAddr, remoteAddr *wire.NetAddress) (bool, int) {
+func (a *AddrManager) ValidatePeerNa(localAddr, remoteAddr *wire.NetAddress) (bool, NetAddressReach) {
 	net := getNetwork(localAddr.IP)
 	reach := getReachabilityFrom(localAddr, remoteAddr)
 	valid := (net == IPv4Address && reach == Ipv4) || (net == IPv6Address &&

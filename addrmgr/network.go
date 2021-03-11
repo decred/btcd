@@ -116,18 +116,19 @@ func isOnionCatTor(netIP net.IP) bool {
 	return onionCatNet.Contains(netIP)
 }
 
-// NetworkAddress type is used to classify a network address.
-type NetworkAddress int
+// NetAddressType is used to indicate which network a network address belongs
+// to.
+type NetAddressType int
 
 const (
-	LocalAddress NetworkAddress = iota
+	LocalAddress NetAddressType = iota
 	IPv4Address
 	IPv6Address
-	OnionAddress
+	TORv2Address
 )
 
 // getNetwork returns the network address type of the provided network address.
-func getNetwork(netIP net.IP) NetworkAddress {
+func getNetwork(netIP net.IP) NetAddressType {
 	switch {
 	case isLocal(netIP):
 		return LocalAddress
@@ -136,7 +137,7 @@ func getNetwork(netIP net.IP) NetworkAddress {
 		return IPv4Address
 
 	case isOnionCatTor(netIP):
-		return OnionAddress
+		return TORv2Address
 
 	default:
 		return IPv6Address

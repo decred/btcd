@@ -190,8 +190,8 @@ type relayMsg struct {
 // naSubmission represents a network address submission from an outbound peer.
 type naSubmission struct {
 	na           *wire.NetAddress
-	netType      addrmgr.NetworkAddress
-	reach        int
+	netType      addrmgr.NetAddressType
+	reach        addrmgr.NetAddressReach
 	score        uint32
 	lastAccessed int64
 }
@@ -277,7 +277,7 @@ func (sc *naSubmissionCache) incrementScore(key string) error {
 
 // bestSubmission fetches the best scoring submission of the provided
 // network interface.
-func (sc *naSubmissionCache) bestSubmission(net addrmgr.NetworkAddress) *naSubmission {
+func (sc *naSubmissionCache) bestSubmission(net addrmgr.NetAddressType) *naSubmission {
 	sc.mtx.Lock()
 	defer sc.mtx.Unlock()
 
@@ -361,7 +361,7 @@ func (ps *peerState) forAllPeers(closure func(sp *serverPeer)) {
 // ResolveLocalAddress picks the best suggested network address from available
 // options, per the network interface key provided. The best suggestion, if
 // found, is added as a local address.
-func (ps *peerState) ResolveLocalAddress(netType addrmgr.NetworkAddress, addrMgr *addrmgr.AddrManager, services wire.ServiceFlag) {
+func (ps *peerState) ResolveLocalAddress(netType addrmgr.NetAddressType, addrMgr *addrmgr.AddrManager, services wire.ServiceFlag) {
 	best := ps.subCache.bestSubmission(netType)
 	if best == nil {
 		return

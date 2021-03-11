@@ -720,7 +720,7 @@ func TestValidatePeerNa(t *testing.T) {
 		localAddress  string
 		remoteAddress string
 		valid         bool
-		reach         int
+		reach         NetAddressReach
 	}{
 		{
 			name:          "torv2 to torv2",
