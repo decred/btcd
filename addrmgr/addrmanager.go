@@ -7,7 +7,6 @@ package addrmgr
 
 import (
 	crand "crypto/rand" // for seeding
-	"encoding/base32"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -16,7 +15,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,11 +35,6 @@ type AddrManager struct {
 	// peersFile is the path of file that the address manager's serialized state
 	// is saved to and loaded from.
 	peersFile string
-
-	// lookupFunc is a function provided to the address manager that is used to
-	// perform DNS lookups for a given hostname.
-	// The provided function MUST be safe for concurrent access.
-	lookupFunc func(string) ([]net.IP, error)
 
 	// rand is the address manager's internal PRNG.  It is used to both randomly
 	// retrieve addresses from the address manager's internal new and tried
@@ -751,41 +744,6 @@ func (a *AddrManager) reset() {
 	}
 }
 
-// HostToNetAddress parses and returns an address manager network address given
-// a hostname in a supported format (IPv4, IPv6, TORv2).  If the hostname
-// cannot be immediately converted from a known address format, it will be
-// resolved using the lookup function provided to the address manager. If it
-// cannot be resolved, an error is returned.
-//
-// This function is safe for concurrent access.
-func (a *AddrManager) HostToNetAddress(host string, port uint16, services ServiceFlag) (*NetAddress, error) {
-	// Tor address is 16 char base32 + ".onion"
-	var ip net.IP
-	if len(host) == 22 && host[16:] == ".onion" {
-		// go base32 encoding uses capitals (as does the rfc
-		// but Tor and bitcoind tend to user lowercase, so we switch
-		// case here.
-		data, err := base32.StdEncoding.DecodeString(
-			strings.ToUpper(host[:16]))
-		if err != nil {
-			return nil, err
-		}
-		prefix := []byte{0xfd, 0x87, 0xd8, 0x7e, 0xeb, 0x43}
-		ip = net.IP(append(prefix, data...))
-	} else if ip = net.ParseIP(host); ip == nil {
-		ips, err := a.lookupFunc(host)
-		if err != nil {
-			return nil, err
-		}
-		if len(ips) == 0 {
-			return nil, fmt.Errorf("no addresses found for %s", host)
-		}
-		ip = ips[0]
-	}
-
-	return NewNetAddress(ip, port, services), nil
-}
-
 // GetAddress returns a single address that should be routable.  It picks a
 // random one from the possible addresses with preference given to ones that
 // have not been used recently and should not pick 'close' addresses
@@ -1237,7 +1195,11 @@ func (a *AddrManager) GetBestLocalAddress(remoteAddr *NetAddress) *NetAddress {
 //
 // This function is safe for concurrent access.
 func (a *AddrManager) ValidatePeerNa(localAddr, remoteAddr *NetAddress) (bool, NetAddressReach) {
-	net := getNetwork(localAddr.IP)
+	net := localAddr.Type
+	if isLocal(localAddr.IP) {
+		net = UnknownAddressType
+	}
+
 	reach := getReachabilityFrom(localAddr, remoteAddr)
 	valid := (net == IPv4Address && reach == Ipv4) || (net == IPv6Address &&
 		(reach == Ipv6Weak || reach == Ipv6Strong || reach == Teredo))
@@ -1246,11 +1208,9 @@ func (a *AddrManager) ValidatePeerNa(localAddr, remoteAddr *NetAddress) (bool, N
 
 // New constructs a new address manager instance.
 // Use Start to begin processing asynchronous address updates.
-// The address manager uses lookupFunc for necessary DNS lookups.
-func New(dataDir string, lookupFunc func(string) ([]net.IP, error)) *AddrManager {
+func New(dataDir string) *AddrManager {
 	am := AddrManager{
 		peersFile:       filepath.Join(dataDir, peersFilename),
-		lookupFunc:      lookupFunc,
 		rand:            rand.New(rand.NewSource(time.Now().UnixNano())),
 		quit:            make(chan struct{}),
 		localAddresses:  make(map[string]*localAddress),

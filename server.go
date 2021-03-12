@@ -358,6 +358,36 @@ func (ps *peerState) forAllPeers(closure func(sp *serverPeer)) {
 	ps.forAllOutboundPeers(closure)
 }
 
+// hostToNetAddress parses and returns an address manager network address given
+// a hostname in a supported format (IPv4, IPv6, TORv2).  If the hostname
+// cannot be immediately converted from a known address format, it will be
+// resolved using a DNS lookup function. If it cannot be resolved, an error is
+// returned.
+func (cfg *config) hostToNetAddress(host string, port uint16, services wire.ServiceFlag) (*addrmgr.NetAddress, error) {
+	addrmgrServices := addrmgr.ServiceFlag(services)
+	networkID, addrBytes, err := addrmgr.HostToBytes(host)
+	if err != nil {
+		return nil, err
+	}
+	if networkID != addrmgr.UnknownAddressType {
+		// Since the host has been successfully decoded, there is no need to
+		// perform a DNS lookup.
+		now := time.Unix(time.Now().Unix(), 0)
+		return addrmgr.NewNetAddressByType(networkID, addrBytes, port,
+			now, addrmgrServices)
+	}
+
+	ips, err := cfg.dcrdLookup(host)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no addresses found for %s", host)
+	}
+	na := addrmgr.NewNetAddress(ips[0], port, addrmgrServices)
+	return na, nil
+}
+
 // ResolveLocalAddress picks the best suggested network address from available
 // options, per the network interface key provided. The best suggestion, if
 // found, is added as a local address.
@@ -380,8 +410,7 @@ func (ps *peerState) ResolveLocalAddress(netType addrmgr.NetAddressType, addrMgr
 	}
 
 	addLocalAddress := func(bestSuggestion string, port uint16, services wire.ServiceFlag) {
-		na, err := addrMgr.HostToNetAddress(bestSuggestion, port,
-			addrmgr.ServiceFlag(services))
+		na, err := cfg.hostToNetAddress(bestSuggestion, port, services)
 		if err != nil {
 			amgrLog.Errorf("unable to generate network address using host %v: "+
 				"%v", bestSuggestion, err)
@@ -2170,8 +2199,7 @@ func newPeerConfig(sp *serverPeer) *peer.Config {
 		},
 		NewestBlock: sp.newestBlock,
 		HostToNetAddress: func(host string, port uint16, services wire.ServiceFlag) (*wire.NetAddress, error) {
-			address, err := sp.server.addrManager.HostToNetAddress(host, port,
-				addrmgr.ServiceFlag(services))
+			address, err := cfg.hostToNetAddress(host, port, services)
 			if err != nil {
 				return nil, err
 			}
@@ -3003,11 +3031,10 @@ func (s *server) querySeeders(ctx context.Context) {
 			// seeded addresses.  In the incredibly rare event that the lookup
 			// fails after it just succeeded, fall back to using the first
 			// returned address as the source.
-			srcAddr := wireToAddrmgrNetAddress(addrs[0])
-			srcIPs, err := dcrdLookup(seeder)
-			if err == nil && len(srcIPs) > 0 {
-				const httpsPort = 443
-				srcAddr = addrmgr.NewNetAddress(srcIPs[0], httpsPort, 0)
+			const httpsPort = 443
+			srcAddr, err := cfg.hostToNetAddress(seeder, httpsPort, 0)
+			if err != nil {
+				srcAddr = wireToAddrmgrNetAddress(addrs[0])
 			}
 
 			addresses := wireToAddrmgrNetAddresses(addrs)
@@ -3332,7 +3359,7 @@ func setupRPCListeners() ([]net.Listener, error) {
 // decred network type specified by chainParams.  Use start to begin accepting
 // connections from peers.
 func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainParams *chaincfg.Params, dataDir string) (*server, error) {
-	amgr := addrmgr.New(cfg.DataDir, dcrdLookup)
+	amgr := addrmgr.New(cfg.DataDir)
 	services := defaultServices
 
 	var listeners []net.Listener
@@ -3842,8 +3869,7 @@ func initListeners(ctx context.Context, params *chaincfg.Params, amgr *addrmgr.A
 				eport = uint16(port)
 			}
 
-			na, err := amgr.HostToNetAddress(host, eport,
-				addrmgr.ServiceFlag(services))
+			na, err := cfg.hostToNetAddress(host, eport, services)
 			if err != nil {
 				srvrLog.Warnf("Not adding %s as externalip: %v", sip, err)
 				continue
@@ -3889,7 +3915,7 @@ func addrStringToNetAddr(addr string) (net.Addr, error) {
 	// Attempt to look up an IP address associated with the parsed host.
 	// The dcrdLookup function will transparently handle performing the
 	// lookup over Tor if necessary.
-	ips, err := dcrdLookup(host)
+	ips, err := cfg.dcrdLookup(host)
 	if err != nil {
 		return nil, err
 	}
@@ -3944,8 +3970,7 @@ func addLocalAddress(addrMgr *addrmgr.AddrManager, addr string, services wire.Se
 			addrMgr.AddLocalAddress(netAddr, addrmgr.BoundPrio)
 		}
 	} else {
-		na, err := addrMgr.HostToNetAddress(host, uint16(port),
-			addrmgr.ServiceFlag(services))
+		na, err := cfg.hostToNetAddress(host, uint16(port), services)
 		if err != nil {
 			return err
 		}

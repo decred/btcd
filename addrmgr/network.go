@@ -121,28 +121,11 @@ func isOnionCatTor(netIP net.IP) bool {
 type NetAddressType int
 
 const (
-	LocalAddress NetAddressType = iota
+	UnknownAddressType NetAddressType = iota
 	IPv4Address
 	IPv6Address
 	TORv2Address
 )
-
-// getNetwork returns the network address type of the provided network address.
-func getNetwork(netIP net.IP) NetAddressType {
-	switch {
-	case isLocal(netIP):
-		return LocalAddress
-
-	case isIPv4(netIP):
-		return IPv4Address
-
-	case isOnionCatTor(netIP):
-		return TORv2Address
-
-	default:
-		return IPv6Address
-	}
-}
 
 // isRFC1918 returns whether or not the passed address is part of the IPv4
 // private network address space as defined by RFC1918 (10.0.0.0/8,
