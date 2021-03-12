@@ -38,11 +38,6 @@ type AddrManager struct {
 	// is saved to and loaded from.
 	peersFile string
 
-	// lookupFunc is a function provided to the address manager that is used to
-	// perform DNS lookups for a given hostname.
-	// The provided function MUST be safe for concurrent access.
-	lookupFunc func(string) ([]net.IP, error)
-
 	// rand is the address manager's internal PRNG.  It is used to both randomly
 	// retrieve addresses from the address manager's internal new and tried
 	// buckets in addition to deciding whether an unknown address is accepted
@@ -800,34 +795,6 @@ func ParseHost(host string) (NetAddressType, []byte, error) {
 	return UnknownAddressType, nil, nil
 }
 
-// HostToNetAddress parses and returns a network address given a hostname in a
-// supported format (IPv4, IPv6, TORv2).  If the hostname cannot be immediately
-// converted from a known address format, it will be resolved using the lookup
-// function provided to the address manager. If it cannot be resolved, an error
-// is returned.
-//
-// This function is safe for concurrent access.
-func (a *AddrManager) HostToNetAddress(host string, port uint16, services ServiceFlag) (*NetAddress, error) {
-	networkID, addrBytes, err := ParseHost(host)
-	if err != nil {
-		return nil, err
-	}
-	if networkID != UnknownAddressType {
-		// Since the host has been successfully decoded, there is no need to
-		// perform a DNS lookup.
-		now := time.Unix(time.Now().Unix(), 0)
-		return NewNetAddressByType(networkID, addrBytes, port, now, services)
-	}
-	ips, err := a.lookupFunc(host)
-	if err != nil {
-		return nil, err
-	}
-	if len(ips) == 0 {
-		return nil, fmt.Errorf("no addresses found for %s", host)
-	}
-	return NewNetAddressIPPort(ips[0], port, services), nil
-}
-
 // GetAddress returns a single address that should be routable.  It picks a
 // random one from the possible addresses with preference given to ones that
 // have not been used recently and should not pick 'close' addresses
@@ -1297,11 +1264,9 @@ func (a *AddrManager) ValidatePeerNa(localAddr, remoteAddr *NetAddress) (bool, N
 
 // New constructs a new address manager instance.
 // Use Start to begin processing asynchronous address updates.
-// The address manager uses lookupFunc for necessary DNS lookups.
-func New(dataDir string, lookupFunc func(string) ([]net.IP, error)) *AddrManager {
+func New(dataDir string) *AddrManager {
 	am := AddrManager{
 		peersFile:       filepath.Join(dataDir, peersFilename),
-		lookupFunc:      lookupFunc,
 		rand:            rand.New(rand.NewSource(time.Now().UnixNano())),
 		quit:            make(chan struct{}),
 		localAddresses:  make(map[string]*localAddress),
