@@ -93,30 +93,38 @@ func readAddrmgrNetAddress(op string, r io.Reader, pver uint32) (*addrmgr.NetAdd
 
 	// Read the ip bytes with a length varying by the network id type.
 	var ipBytes []byte
-	switch na.Type {
-	case addrmgr.IPv4Address:
+	switch {
+	case na.Type == addrmgr.IPv4Address:
 		var ip [4]byte
 		err := readElement(r, &ip)
 		if err != nil {
 			return nil, err
 		}
 		ipBytes = ip[:]
-	case addrmgr.TORv2Address:
+	case na.Type == addrmgr.TORv2Address:
 		var ip [10]byte
 		err := readElement(r, &ip)
 		if err != nil {
 			return nil, err
 		}
 		ipBytes = ip[:]
-	case addrmgr.IPv6Address:
+	case na.Type == addrmgr.IPv6Address:
 		var ip [16]byte
 		err := readElement(r, &ip)
 		if err != nil {
 			return nil, err
 		}
 		ipBytes = ip[:]
+	case na.Type == addrmgr.TORv3Address && pver >= RelayTORv3Version:
+		var ip [32]byte
+		err := readElement(r, &ip)
+		if err != nil {
+			return nil, err
+		}
+		ipBytes = ip[:]
 	default:
-		msg := fmt.Sprintf("unsupported network address type %v", na.Type)
+		msg := fmt.Sprintf("unsupported network address type %v for "+
+			"protocol version %d", na.Type, pver)
 		return nil, messageError(op, ErrInvalidMsg, msg)
 	}
 
@@ -143,8 +151,8 @@ func writeAddrmgrNetAddress(op string, w io.Writer, pver uint32, na *addrmgr.Net
 	}
 
 	netAddrIP := na.IP
-	switch na.Type {
-	case addrmgr.IPv4Address:
+	switch {
+	case na.Type == addrmgr.IPv4Address:
 		var ip [4]byte
 		if netAddrIP != nil {
 			copy(ip[:], netAddrIP)
@@ -153,7 +161,7 @@ func writeAddrmgrNetAddress(op string, w io.Writer, pver uint32, na *addrmgr.Net
 		if err != nil {
 			return err
 		}
-	case addrmgr.TORv2Address:
+	case na.Type == addrmgr.TORv2Address:
 		var ip [10]byte
 		if netAddrIP != nil {
 			pubkey := netAddrIP[6:]
@@ -163,7 +171,7 @@ func writeAddrmgrNetAddress(op string, w io.Writer, pver uint32, na *addrmgr.Net
 		if err != nil {
 			return err
 		}
-	case addrmgr.IPv6Address:
+	case na.Type == addrmgr.IPv6Address:
 		var ip [16]byte
 		if netAddrIP != nil {
 			copy(ip[:], net.IP(netAddrIP).To16())
@@ -172,8 +180,18 @@ func writeAddrmgrNetAddress(op string, w io.Writer, pver uint32, na *addrmgr.Net
 		if err != nil {
 			return err
 		}
+	case na.Type == addrmgr.TORv3Address && pver >= RelayTORv3Version:
+		var ip [32]byte
+		if len(na.IP) == 32 {
+			copy(ip[:], net.IP(na.IP))
+		}
+		err = writeElement(w, ip)
+		if err != nil {
+			return err
+		}
 	default:
-		msg := fmt.Sprintf("unrecognized network address type %v", na.Type)
+		msg := fmt.Sprintf("unsupported network address type %v for "+
+			"protocol version %d", na.Type, pver)
 		return messageError(op, ErrInvalidMsg, msg)
 	}
 
@@ -183,11 +201,25 @@ func writeAddrmgrNetAddress(op string, w io.Writer, pver uint32, na *addrmgr.Net
 // maxNetAddressPayloadV2 returns the max payload size for an address manager
 // network address based on the protocol version.
 func maxNetAddressPayloadV2(pver uint32) uint32 {
-	const timestampSize = 8
-	const servicesSize = 8
-	const addressTypeSize = 1
-	const maxAddressSize = 16
-	const portSize = 2
+	if pver < RelayTORv3Version {
+		const (
+			timestampSize   = 8
+			servicesSize    = 8
+			addressTypeSize = 1
+			maxAddressSize  = 16
+			portSize        = 2
+		)
+		return timestampSize + servicesSize + addressTypeSize + maxAddressSize +
+			portSize
+	}
+
+	const (
+		timestampSize   = 8
+		servicesSize    = 8
+		addressTypeSize = 1
+		maxAddressSize  = 32
+		portSize        = 2
+	)
 	return timestampSize + servicesSize + addressTypeSize + maxAddressSize +
 		portSize
 }

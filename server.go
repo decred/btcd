@@ -74,7 +74,7 @@ const (
 	connectionRetryInterval = time.Second * 5
 
 	// maxProtocolVersion is the max protocol version the server supports.
-	maxProtocolVersion = wire.AddrV2Version
+	maxProtocolVersion = wire.RelayTORv3Version
 
 	// These fields are used to track known addresses on a per-peer basis.
 	//
@@ -761,8 +761,13 @@ func hasServices(advertised, desired wire.ServiceFlag) bool {
 // supportedNetAddressTypeFlags returns the network address type flags supported
 // by the provided protocol version.
 func supportedNetAddressTypeFlags(pver uint32) addrmgr.NetAddressTypeFlags {
+	if pver < wire.RelayTORv3Version {
+		return addrmgr.IPv4AddressFlag | addrmgr.IPv6AddressFlag |
+			addrmgr.TORv2AddressFlag
+	}
+
 	return addrmgr.IPv4AddressFlag | addrmgr.IPv6AddressFlag |
-		addrmgr.TORv2AddressFlag
+		addrmgr.TORv2AddressFlag | addrmgr.TORv3AddressFlag
 }
 
 // OnVersion is invoked when a peer receives a version wire message and is used

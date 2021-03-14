@@ -31,6 +31,8 @@ var (
 	ipv4Address  = newNetAddress("127.0.0.1", 8333)
 	ipv6Address  = newNetAddress("2620:100::1", 8334)
 	torv2Address = newNetAddress("aaaaaaaaaaaaaaaa.onion", 8335)
+	torv3Address = newNetAddress(
+		"xa4r2iadxm55fbnqgwwi5mymqdcofiu3w6rpbtqn7b2dyn7mgwj64jyd.onion", 8336)
 
 	ipv4AddressBytes = []byte{
 		0x29, 0xab, 0x5f, 0x49, 0x00, 0x00, 0x00, 0x00, // Timestamp
@@ -54,6 +56,16 @@ var (
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x8f, 0x20,
 	}
+	torv3AddressBytes = []byte{
+		0x29, 0xab, 0x5f, 0x49, 0x00, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x04,
+		0xb8, 0x39, 0x1d, 0x20, 0x03, 0xbb, 0x3b, 0xd2,
+		0x85, 0xb0, 0x35, 0xac, 0x8e, 0xb3, 0x0c, 0x80,
+		0xc4, 0xe2, 0xa2, 0x9b, 0xb7, 0xa2, 0xf0, 0xce,
+		0x0d, 0xf8, 0x74, 0x3c, 0x37, 0xec, 0x35, 0x93,
+		0x90, 0x20,
+	}
 )
 
 // TestMaxPayloadLength verifies the maximum payload length equals the expected
@@ -76,9 +88,14 @@ func TestMaxPayloadLength(t *testing.T) {
 			want: 35003,
 		},
 		{
+			name: "protocol version 11",
+			pver: RelayTORv3Version,
+			want: 51003,
+		},
+		{
 			name: "latest protocol version",
 			pver: ProtocolVersion,
-			want: 35003,
+			want: 51003,
 		},
 	}
 
@@ -173,12 +190,14 @@ func TestAddrV2Wire(t *testing.T) {
 				ipv4Address,
 				ipv6Address,
 				torv2Address,
+				torv3Address,
 			},
 			wantBytes: bytes.Join([][]byte{
-				{0x03},
+				{0x04},
 				ipv4AddressBytes,
 				ipv6AddressBytes,
 				torv2AddressBytes,
+				torv3AddressBytes,
 			}, []byte{}),
 		},
 	}
@@ -225,6 +244,7 @@ func TestAddrV2WireErrors(t *testing.T) {
 	pver := ProtocolVersion
 	na := newNetAddress("127.0.0.1", 8333)
 	addrs := []*addrmgr.NetAddress{na}
+	addrv2 := NewMsgAddrV2()
 
 	tests := []struct {
 		name     string
@@ -285,6 +305,15 @@ func TestAddrV2WireErrors(t *testing.T) {
 			ioLimit:  3,
 			writeErr: ErrTooManyAddrs,
 			readErr:  ErrTooManyAddrs,
+		},
+		{
+			name:     "torv3 address invalid on protocol version 10",
+			pver:     RelayTORv3Version - 1,
+			addrs:    []*addrmgr.NetAddress{torv3Address},
+			bytes:    []byte{0x01},
+			ioLimit:  int(addrv2.MaxPayloadLength(RelayTORv3Version - 1)),
+			writeErr: ErrInvalidMsg,
+			readErr:  ErrInvalidMsg,
 		},
 	}
 
