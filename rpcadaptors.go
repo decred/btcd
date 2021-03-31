@@ -303,7 +303,7 @@ func (cm *rpcConnManager) AddedNodeInfo() []rpcserver.Peer {
 // This function is safe for concurrent access and is part of the
 // rpcserver.ConnManager interface implementation.
 func (*rpcConnManager) Lookup(host string) ([]net.IP, error) {
-	return dcrdLookup(host)
+	return cfg.dcrdLookup(host)
 }
 
 // rpcSyncMgr provides an adaptor for use with the RPC server and implements the

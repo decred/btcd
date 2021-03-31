@@ -48,6 +48,9 @@ const (
 	// is received.
 	ErrPayloadChecksum
 
+	// ErrTooFewAddrs is returned when an address list has zero addresses.
+	ErrTooFewAddrs
+
 	// ErrTooManyAddrs is returned when an address list exceeds the maximum
 	// allowed.
 	ErrTooManyAddrs

@@ -30,6 +30,8 @@ const MaxMessagePayload = (1024 * 1024 * 32) // 32MB
 const (
 	CmdVersion        = "version"
 	CmdVerAck         = "verack"
+	CmdGetAddrV2      = "getaddrv2"
+	CmdAddrV2         = "addrv2"
 	CmdGetAddr        = "getaddr"
 	CmdAddr           = "addr"
 	CmdGetBlocks      = "getblocks"
@@ -83,6 +85,12 @@ func makeEmptyMessage(command string) (Message, error) {
 
 	case CmdVerAck:
 		msg = &MsgVerAck{}
+
+	case CmdGetAddrV2:
+		msg = &MsgGetAddrV2{}
+
+	case CmdAddrV2:
+		msg = &MsgAddrV2{}
 
 	case CmdGetAddr:
 		msg = &MsgGetAddr{}

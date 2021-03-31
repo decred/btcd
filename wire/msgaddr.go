@@ -60,6 +60,12 @@ func (msg *MsgAddr) ClearAddresses() {
 // This is part of the Message interface implementation.
 func (msg *MsgAddr) BtcDecode(r io.Reader, pver uint32) error {
 	const op = "MsgAddr.BtcDecode"
+	if pver >= AddrV2Version {
+		msg := fmt.Sprintf("%s message invalid for protocol version %d",
+			msg.Command(), pver)
+		return messageError(op, ErrMsgInvalidForPVer, msg)
+	}
+
 	count, err := ReadVarInt(r, pver)
 	if err != nil {
 		return err
@@ -89,6 +95,12 @@ func (msg *MsgAddr) BtcDecode(r io.Reader, pver uint32) error {
 // This is part of the Message interface implementation.
 func (msg *MsgAddr) BtcEncode(w io.Writer, pver uint32) error {
 	const op = "MsgAddr.BtcEncode"
+	if pver >= AddrV2Version {
+		msg := fmt.Sprintf("%s message invalid for protocol version %d",
+			msg.Command(), pver)
+		return messageError(op, ErrMsgInvalidForPVer, msg)
+	}
+
 	// Protocol versions before MultipleAddressVersion only allowed 1 address
 	// per message.
 	count := len(msg.AddrList)
@@ -122,6 +134,9 @@ func (msg *MsgAddr) Command() string {
 // MaxPayloadLength returns the maximum length the payload can be for the
 // receiver.  This is part of the Message interface implementation.
 func (msg *MsgAddr) MaxPayloadLength(pver uint32) uint32 {
+	if pver >= AddrV2Version {
+		return 0
+	}
 	// Num addresses (size of varInt for max address per message) + max allowed
 	// addresses * max address size.
 	return uint32(VarIntSerializeSize(MaxAddrPerMsg)) +

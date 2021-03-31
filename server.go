@@ -73,7 +73,7 @@ const (
 	connectionRetryInterval = time.Second * 5
 
 	// maxProtocolVersion is the max protocol version the server supports.
-	maxProtocolVersion = wire.InitStateVersion
+	maxProtocolVersion = wire.AddrV2Version
 
 	// These fields are used to track known addresses on a per-peer basis.
 	//
@@ -191,8 +191,8 @@ type relayMsg struct {
 // naSubmission represents a network address submission from an outbound peer.
 type naSubmission struct {
 	na           *wire.NetAddress
-	netType      addrmgr.NetworkAddress
-	reach        int
+	netType      addrmgr.NetAddressType
+	reach        addrmgr.NetAddressReach
 	score        uint32
 	lastAccessed int64
 }
@@ -278,7 +278,7 @@ func (sc *naSubmissionCache) incrementScore(key string) error {
 
 // bestSubmission fetches the best scoring submission of the provided
 // network interface.
-func (sc *naSubmissionCache) bestSubmission(net addrmgr.NetworkAddress) *naSubmission {
+func (sc *naSubmissionCache) bestSubmission(net addrmgr.NetAddressType) *naSubmission {
 	sc.mtx.Lock()
 	defer sc.mtx.Unlock()
 
@@ -359,10 +359,40 @@ func (ps *peerState) forAllPeers(closure func(sp *serverPeer)) {
 	ps.forAllOutboundPeers(closure)
 }
 
+// hostToNetAddress parses and returns an address manager network address given
+// a hostname in a supported format (IPv4, IPv6, TORv2).  If the hostname
+// cannot be immediately converted from a known address format, it will be
+// resolved using a DNS lookup function. If it cannot be resolved, an error is
+// returned.
+func (cfg *config) hostToNetAddress(host string, port uint16, services wire.ServiceFlag) (*addrmgr.NetAddress, error) {
+	addrmgrServices := addrmgr.ServiceFlag(services)
+	networkID, addrBytes, err := addrmgr.HostToBytes(host)
+	if err != nil {
+		return nil, err
+	}
+	if networkID != addrmgr.UnknownAddressType {
+		// Since the host has been successfully decoded, there is no need to
+		// perform a DNS lookup.
+		now := time.Unix(time.Now().Unix(), 0)
+		return addrmgr.NewNetAddressByType(networkID, addrBytes, port,
+			now, addrmgrServices)
+	}
+
+	ips, err := cfg.dcrdLookup(host)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no addresses found for %s", host)
+	}
+	na := addrmgr.NewNetAddress(ips[0], port, addrmgrServices)
+	return na, nil
+}
+
 // ResolveLocalAddress picks the best suggested network address from available
 // options, per the network interface key provided. The best suggestion, if
 // found, is added as a local address.
-func (ps *peerState) ResolveLocalAddress(netType addrmgr.NetworkAddress, addrMgr *addrmgr.AddrManager, services wire.ServiceFlag) {
+func (ps *peerState) ResolveLocalAddress(netType addrmgr.NetAddressType, addrMgr *addrmgr.AddrManager, services wire.ServiceFlag) {
 	best := ps.subCache.bestSubmission(netType)
 	if best == nil {
 		return
@@ -381,7 +411,7 @@ func (ps *peerState) ResolveLocalAddress(netType addrmgr.NetworkAddress, addrMgr
 	}
 
 	addLocalAddress := func(bestSuggestion string, port uint16, services wire.ServiceFlag) {
-		na, err := addrMgr.HostToNetAddress(bestSuggestion, port, services)
+		na, err := cfg.hostToNetAddress(bestSuggestion, port, services)
 		if err != nil {
 			amgrLog.Errorf("unable to generate network address using host %v: "+
 				"%v", bestSuggestion, err)
@@ -573,15 +603,15 @@ func (sp *serverPeer) newestBlock() (*chainhash.Hash, int64, error) {
 
 // addKnownAddresses adds the given addresses to the set of known addresses to
 // the peer to prevent sending duplicate addresses.
-func (sp *serverPeer) addKnownAddresses(addresses []*wire.NetAddress) {
+func (sp *serverPeer) addKnownAddresses(addresses []*addrmgr.NetAddress) {
 	for _, na := range addresses {
-		sp.knownAddresses.Add([]byte(addrmgr.NetAddressKey(na)))
+		sp.knownAddresses.Add([]byte(na.Key()))
 	}
 }
 
 // addressKnown true if the given address is already known to the peer.
-func (sp *serverPeer) addressKnown(na *wire.NetAddress) bool {
-	return sp.knownAddresses.Contains([]byte(addrmgr.NetAddressKey(na)))
+func (sp *serverPeer) addressKnown(na *addrmgr.NetAddress) bool {
+	return sp.knownAddresses.Contains([]byte(na.Key()))
 }
 
 // setDisableRelayTx toggles relaying of transactions for the given peer.
@@ -603,19 +633,72 @@ func (sp *serverPeer) relayTxDisabled() bool {
 	return isDisabled
 }
 
+// wireToAddrmgrNetAddress converts a wire NetAddress to an address manager
+// NetAddress.
+func wireToAddrmgrNetAddress(netAddr *wire.NetAddress) *addrmgr.NetAddress {
+	newNetAddr := addrmgr.NewNetAddress(netAddr.IP, netAddr.Port,
+		addrmgr.ServiceFlag(netAddr.Services))
+	newNetAddr.Timestamp = netAddr.Timestamp
+	return newNetAddr
+}
+
+// wireToAddrmgrNetAddresses converts a collection of wire net addresses to a
+// collection of address manager net addresses.
+func wireToAddrmgrNetAddresses(netAddr []*wire.NetAddress) []*addrmgr.NetAddress {
+	addrs := make([]*addrmgr.NetAddress, len(netAddr))
+	for i, wireAddr := range netAddr {
+		addrs[i] = wireToAddrmgrNetAddress(wireAddr)
+	}
+	return addrs
+}
+
+// addrmgrToWireNetAddress converts an address manager net address to a wire net
+// address.
+func addrmgrToWireNetAddress(netAddr *addrmgr.NetAddress) *wire.NetAddress {
+	return wire.NewNetAddressTimestamp(netAddr.Timestamp,
+		wire.ServiceFlag(netAddr.Services), netAddr.IP, netAddr.Port)
+}
+
 // pushAddrMsg sends an addr message to the connected peer using the provided
 // addresses.
-func (sp *serverPeer) pushAddrMsg(addresses []*wire.NetAddress) {
+func (sp *serverPeer) pushAddrMsg(addresses []*addrmgr.NetAddress) {
 	// Filter addresses already known to the peer.
 	addrs := make([]*wire.NetAddress, 0, len(addresses))
 	for _, addr := range addresses {
+		if addr.Type != addrmgr.IPv4Address &&
+			addr.Type != addrmgr.IPv6Address &&
+			addr.Type != addrmgr.TORv2Address {
+			continue
+		}
 		if !sp.addressKnown(addr) {
-			addrs = append(addrs, addr)
+			wireNetAddr := addrmgrToWireNetAddress(addr)
+			addrs = append(addrs, wireNetAddr)
 		}
 	}
 	known, err := sp.PushAddrMsg(addrs)
 	if err != nil {
 		peerLog.Errorf("Can't push address message to %s: %v", sp.Peer, err)
+		sp.Disconnect()
+		return
+	}
+
+	knownNetAddrs := wireToAddrmgrNetAddresses(known)
+	sp.addKnownAddresses(knownNetAddrs)
+}
+
+// pushAddrV2Msg sends an addrv2 message to the connected peer using the
+// provided addresses.
+func (sp *serverPeer) pushAddrV2Msg(addresses []*addrmgr.NetAddress) {
+	// Filter addresses already known to the peer.
+	addrs := make([]*addrmgr.NetAddress, 0, len(addresses))
+	for _, addr := range addresses {
+		if !sp.addressKnown(addr) {
+			addrs = append(addrs, addr)
+		}
+	}
+	known, err := sp.PushAddrV2Msg(addrs)
+	if err != nil {
+		peerLog.Errorf("Can't push address v2 message to %s: %v", sp.Peer, err)
 		sp.Disconnect()
 		return
 	}
@@ -669,6 +752,12 @@ func hasServices(advertised, desired wire.ServiceFlag) bool {
 	return advertised&desired == desired
 }
 
+// latestSupportedNetAddressType returns the highest supported network address
+// type at the given protocol version.
+func latestSupportedNetAddressType(pver uint32) addrmgr.NetAddressType {
+	return addrmgr.TORv2Address
+}
+
 // OnVersion is invoked when a peer receives a version wire message and is used
 // to negotiate the protocol version details as well as kick start the
 // communications.
@@ -684,14 +773,18 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
 	// it is updated regardless in the case a new minimum protocol version is
 	// enforced and the remote node has not upgraded yet.
 	isInbound := sp.Inbound()
-	remoteAddr := sp.NA()
+	msgProtocolVersion := uint32(msg.ProtocolVersion)
+	remoteAddr := wireToAddrmgrNetAddress(sp.NA())
 	addrManager := sp.server.addrManager
 	if !cfg.SimNet && !cfg.RegNet && !isInbound {
-		addrManager.SetServices(remoteAddr, msg.Services)
+		err := addrManager.SetServices(remoteAddr, addrmgr.ServiceFlag(msg.Services))
+		if err != nil {
+			srvrLog.Errorf("Setting services for address failed: %v", err)
+		}
 	}
 
 	// Reject peers that have a protocol version that is too old.
-	if msg.ProtocolVersion < int32(wire.SendHeadersVersion) {
+	if msgProtocolVersion < wire.SendHeadersVersion {
 		srvrLog.Debugf("Rejecting peer %s with protocol version %d prior to "+
 			"the required version %d", sp.Peer, msg.ProtocolVersion,
 			wire.SendHeadersVersion)
@@ -721,22 +814,36 @@ func (sp *serverPeer) OnVersion(_ *peer.Peer, msg *wire.MsgVersion) {
 		// known tip.
 		if !cfg.DisableListen && sp.server.syncManager.IsCurrent() {
 			// Get address that best matches.
-			lna := addrManager.GetBestLocalAddress(remoteAddr)
-			if addrmgr.IsRoutable(lna) {
-				// Filter addresses the peer already knows about.
-				addresses := []*wire.NetAddress{lna}
-				sp.pushAddrMsg(addresses)
+			newestAddrType := latestSupportedNetAddressType(msgProtocolVersion)
+			lna := addrManager.GetBestLocalAddress(remoteAddr, newestAddrType)
+			if lna.IsRoutable() {
+				addresses := []*addrmgr.NetAddress{lna}
+				if msgProtocolVersion >= wire.AddrV2Version {
+					sp.pushAddrV2Msg(addresses)
+				} else {
+					sp.pushAddrMsg(addresses)
+				}
+			} else {
+				srvrLog.Debugf("Local address %s is not routable and will not "+
+					"be broadcast to outbound peer %v", lna.Key(), sp.Addr())
 			}
 		}
 
 		// Request known addresses if the server address manager needs
 		// more.
 		if addrManager.NeedMoreAddresses() {
-			sp.QueueMessage(wire.NewMsgGetAddr(), nil)
+			if msgProtocolVersion >= wire.AddrV2Version {
+				sp.QueueMessage(wire.NewMsgGetAddrV2(), nil)
+			} else {
+				sp.QueueMessage(wire.NewMsgGetAddr(), nil)
+			}
 		}
 
 		// Mark the address as a known good address.
-		addrManager.Good(remoteAddr)
+		err := addrManager.Good(remoteAddr)
+		if err != nil {
+			srvrLog.Errorf("Marking address as good failed: %v", err)
+		}
 	}
 
 	sp.peerNaMtx.Lock()
@@ -980,7 +1087,7 @@ func (sp *serverPeer) OnGetInitState(p *peer.Peer, msg *wire.MsgGetInitState) {
 	sp.QueueMessage(initMsg, nil)
 }
 
-// OnInitState is invoked when a peer receives a initstate wire message.  It
+// OnInitState is invoked when a peer receives an initstate wire message.  It
 // requests the data advertised in the message from the peer.
 func (sp *serverPeer) OnInitState(p *peer.Peer, msg *wire.MsgInitState) {
 	blockHashes := make([]*chainhash.Hash, 0, len(msg.BlockHashes))
@@ -1345,10 +1452,48 @@ func (sp *serverPeer) OnGetAddr(p *peer.Peer, msg *wire.MsgGetAddr) {
 	sp.addrsSent = true
 
 	// Get the current known addresses from the address manager.
-	addrCache := sp.server.addrManager.AddressCache()
+	addrCache := sp.server.addrManager.AddressCache(addrmgr.TORv2Address)
 
 	// Push the addresses.
 	sp.pushAddrMsg(addrCache)
+}
+
+// OnGetAddrV2 is invoked when a peer receives a getaddrv2 wire message and is
+// used to provide the peer with known addresses from the address manager.
+func (sp *serverPeer) OnGetAddrV2(p *peer.Peer, msg *wire.MsgGetAddrV2) {
+	// Don't return any addresses when running on the simulation and regression
+	// test networks.  This helps prevent the networks from becoming another
+	// public test network since they will not be able to learn about other
+	// peers that have not specifically been provided.
+	if cfg.SimNet || cfg.RegNet {
+		return
+	}
+
+	// Do not accept getaddrv2 requests from outbound peers.  This reduces
+	// fingerprinting attacks.
+	if !p.Inbound() {
+		peerLog.Errorf("Received getaddrv2 request from outbound peer %s",
+			sp.Peer)
+		sp.server.BanPeer(sp)
+		return
+	}
+
+	// Only respond with addresses once per connection.  This helps reduce
+	// traffic and further reduces fingerprinting attacks.
+	if sp.addrsSent {
+		peerLog.Errorf("Received more than one getaddrv2 request from %s",
+			sp.Peer)
+		sp.server.BanPeer(sp)
+		return
+	}
+	sp.addrsSent = true
+
+	// Get the current known addresses from the address manager.
+	newestAddrType := latestSupportedNetAddressType(sp.ProtocolVersion())
+	addrCache := sp.server.addrManager.AddressCache(newestAddrType)
+
+	// Push the addresses.
+	sp.pushAddrV2Msg(addrCache)
 }
 
 // OnAddr is invoked when a peer receives an addr wire message and is used to
@@ -1374,7 +1519,7 @@ func (sp *serverPeer) OnAddr(p *peer.Peer, msg *wire.MsgAddr) {
 
 	now := time.Now()
 	for _, na := range msg.AddrList {
-		// Don't add more address if we're disconnecting.
+		// Don't add more addresses if we're disconnecting.
 		if !p.Connected() {
 			return
 		}
@@ -1387,15 +1532,53 @@ func (sp *serverPeer) OnAddr(p *peer.Peer, msg *wire.MsgAddr) {
 		}
 
 		// Add address to known addresses for this peer.
-		sp.addKnownAddresses([]*wire.NetAddress{na})
+		netAddr := wireToAddrmgrNetAddress(na)
+		sp.addKnownAddresses([]*addrmgr.NetAddress{netAddr})
 	}
 
 	// Add addresses to server address manager.  The address manager handles
 	// the details of things such as preventing duplicate addresses, max
 	// addresses, and last seen updates.
-	// XXX bitcoind gives a 2 hour time penalty here, do we want to do the
-	// same?
-	sp.server.addrManager.AddAddresses(msg.AddrList, p.NA())
+	addresses := wireToAddrmgrNetAddresses(msg.AddrList)
+	srcAddr := wireToAddrmgrNetAddress(p.NA())
+	sp.server.addrManager.AddAddresses(addresses, srcAddr)
+}
+
+// OnAddrV2 is invoked when a peer receives an addrv2 wire message and is used
+// to notify the server about advertised addresses.
+func (sp *serverPeer) OnAddrV2(p *peer.Peer, msg *wire.MsgAddrV2) {
+	// Ignore addresses when running on the simulation and regression test
+	// networks.  This helps prevent the networks from becoming another public
+	// test network since they will not be able to learn about other peers that
+	// have not specifically been provided.
+	if cfg.SimNet || cfg.RegNet {
+		return
+	}
+
+	now := time.Now()
+	for _, netAddr := range msg.AddrList {
+		// Don't add more addresses if we're disconnecting.
+		if !p.Connected() {
+			peerLog.Debugf("Not adding addresses from disconnected peer %v", sp)
+			return
+		}
+
+		// Set the timestamp to 5 days ago if it's more than 24 hours
+		// in the future so this address is one of the first to be
+		// removed when space is needed.
+		if netAddr.Timestamp.After(now.Add(time.Minute * 10)) {
+			netAddr.Timestamp = now.Add(-1 * time.Hour * 24 * 5)
+		}
+
+		// Add address to known addresses for this peer.
+		sp.addKnownAddresses([]*addrmgr.NetAddress{netAddr})
+	}
+
+	// Add addresses to server address manager.  The address manager handles
+	// the details of things such as preventing duplicate addresses, max
+	// addresses, and last seen updates.
+	srcAddr := wireToAddrmgrNetAddress(p.NA())
+	sp.server.addrManager.AddAddresses(msg.AddrList, srcAddr)
 }
 
 // OnRead is invoked when a peer receives a message and it is used to update
@@ -1631,13 +1814,14 @@ func (s *server) handleAddPeerMsg(state *peerState, sp *serverPeer) bool {
 		return false
 	}
 
-	// Disconnect banned peers.
 	host, _, err := net.SplitHostPort(sp.Addr())
 	if err != nil {
 		srvrLog.Debugf("can't split hostport %v", err)
 		sp.Disconnect()
 		return false
 	}
+
+	// Disconnect banned peers.
 	if banEnd, ok := state.banned[host]; ok {
 		if time.Now().Before(banEnd) {
 			srvrLog.Debugf("Peer %s is banned for another %v - disconnecting",
@@ -1695,7 +1879,7 @@ func (s *server) handleAddPeerMsg(state *peerState, sp *serverPeer) bool {
 			}
 		}
 	} else {
-		state.outboundGroups[addrmgr.GroupKey(sp.NA())]++
+		state.outboundGroups[addrmgr.GroupKey(sp.NA().IP)]++
 		if sp.persistent {
 			state.persistentPeers[sp.ID()] = sp
 		} else {
@@ -1730,7 +1914,9 @@ func (s *server) handleAddPeerMsg(state *peerState, sp *serverPeer) bool {
 				net = addrmgr.IPv6Address
 			}
 
-			valid, reach := s.addrManager.ValidatePeerNa(na, sp.NA())
+			localAddr := wireToAddrmgrNetAddress(na)
+			remoteAddr := wireToAddrmgrNetAddress(sp.NA())
+			valid, reach := s.addrManager.ValidatePeerNa(localAddr, remoteAddr)
 			if !valid {
 				return true
 			}
@@ -1780,7 +1966,7 @@ func (s *server) handleDonePeerMsg(state *peerState, sp *serverPeer) {
 	}
 	if _, ok := list[sp.ID()]; ok {
 		if !sp.Inbound() && sp.VersionKnown() {
-			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
+			state.outboundGroups[addrmgr.GroupKey(sp.NA().IP)]--
 		}
 		if !sp.Inbound() && sp.connReq != nil {
 			s.connManager.Disconnect(sp.connReq.ID())
@@ -1797,7 +1983,11 @@ func (s *server) handleDonePeerMsg(state *peerState, sp *serverPeer) {
 	// Update the address' last seen time if the peer has acknowledged
 	// our version and has sent us its version as well.
 	if sp.VerAckReceived() && sp.VersionKnown() && sp.NA() != nil {
-		s.addrManager.Connected(sp.NA())
+		peerNetAddr := wireToAddrmgrNetAddress(sp.NA())
+		err := s.addrManager.Connected(peerNetAddr)
+		if err != nil {
+			srvrLog.Debugf("Marking address as connected failed: %v", err)
+		}
 	}
 
 	// If we get here it means that either we didn't know about the peer
@@ -2007,7 +2197,7 @@ func (s *server) handleQuery(state *peerState, querymsg interface{}) {
 		found := disconnectPeer(state.persistentPeers, msg.cmp, func(sp *serverPeer) {
 			// Keep group counts ok since we remove from
 			// the list now.
-			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
+			state.outboundGroups[addrmgr.GroupKey(sp.NA().IP)]--
 
 			peerLog.Debugf("Removing persistent peer %s:%d (reqid %d)",
 				sp.NA().IP, sp.NA().Port, sp.connReq.ID())
@@ -2062,7 +2252,7 @@ func (s *server) handleQuery(state *peerState, querymsg interface{}) {
 		found = disconnectPeer(state.outboundPeers, msg.cmp, func(sp *serverPeer) {
 			// Keep group counts ok since we remove from
 			// the list now.
-			state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
+			state.outboundGroups[addrmgr.GroupKey(sp.NA().IP)]--
 		})
 		if found {
 			// If there are multiple outbound connections to the same
@@ -2070,7 +2260,7 @@ func (s *server) handleQuery(state *peerState, querymsg interface{}) {
 			// peers are found.
 			for found {
 				found = disconnectPeer(state.outboundPeers, msg.cmp, func(sp *serverPeer) {
-					state.outboundGroups[addrmgr.GroupKey(sp.NA())]--
+					state.outboundGroups[addrmgr.GroupKey(sp.NA().IP)]--
 				})
 			}
 			msg.reply <- nil
@@ -2132,14 +2322,22 @@ func newPeerConfig(sp *serverPeer) *peer.Config {
 			OnGetCFilterV2:   sp.OnGetCFilterV2,
 			OnGetCFHeaders:   sp.OnGetCFHeaders,
 			OnGetCFTypes:     sp.OnGetCFTypes,
+			OnGetAddrV2:      sp.OnGetAddrV2,
+			OnAddrV2:         sp.OnAddrV2,
 			OnGetAddr:        sp.OnGetAddr,
 			OnAddr:           sp.OnAddr,
 			OnRead:           sp.OnRead,
 			OnWrite:          sp.OnWrite,
 			OnNotFound:       sp.OnNotFound,
 		},
-		NewestBlock:       sp.newestBlock,
-		HostToNetAddress:  sp.server.addrManager.HostToNetAddress,
+		NewestBlock: sp.newestBlock,
+		HostToNetAddress: func(host string, port uint16, services wire.ServiceFlag) (*wire.NetAddress, error) {
+			address, err := cfg.hostToNetAddress(host, port, services)
+			if err != nil {
+				return nil, err
+			}
+			return addrmgrToWireNetAddress(address), nil
+		},
 		Proxy:             cfg.Proxy,
 		UserAgentName:     userAgentName,
 		UserAgentVersion:  userAgentVersion,
@@ -2182,7 +2380,12 @@ func (s *server) outboundPeerConnected(c *connmgr.ConnReq, conn net.Conn) {
 	sp.isWhitelisted = isWhitelisted(conn.RemoteAddr())
 	sp.AssociateConnection(conn)
 	go s.peerDoneHandler(sp)
-	s.addrManager.Attempt(sp.NA())
+
+	peerNetAddr := wireToAddrmgrNetAddress(sp.NA())
+	err = s.addrManager.Attempt(peerNetAddr)
+	if err != nil {
+		srvrLog.Debugf("Marking address as attempted failed: %v", err)
+	}
 }
 
 // peerDoneHandler handles peer disconnects by notifying the server that it's
@@ -2964,13 +3167,14 @@ func (s *server) querySeeders(ctx context.Context) {
 			// seeded addresses.  In the incredibly rare event that the lookup
 			// fails after it just succeeded, fall back to using the first
 			// returned address as the source.
-			srcAddr := addrs[0]
-			srcIPs, err := dcrdLookup(seeder)
-			if err == nil && len(srcIPs) > 0 {
-				const httpsPort = 443
-				srcAddr = wire.NewNetAddressIPPort(srcIPs[0], httpsPort, 0)
+			const httpsPort = 443
+			srcAddr, err := cfg.hostToNetAddress(seeder, httpsPort, 0)
+			if err != nil {
+				srcAddr = wireToAddrmgrNetAddress(addrs[0])
 			}
-			s.addrManager.AddAddresses(addrs, srcAddr)
+
+			addresses := wireToAddrmgrNetAddresses(addrs)
+			s.addrManager.AddAddresses(addresses, srcAddr)
 		}(seeder)
 	}
 }
@@ -3126,15 +3330,16 @@ out:
 					srvrLog.Warnf("UPnP can't get external address: %v", err)
 					continue out
 				}
-				na := wire.NewNetAddressIPPort(externalip, uint16(listenPort),
+				wireNA := wire.NewNetAddressIPPort(externalip, uint16(listenPort),
 					s.services)
-				err = s.addrManager.AddLocalAddress(na, addrmgr.UpnpPrio)
+				localAddr := wireToAddrmgrNetAddress(wireNA)
+				err = s.addrManager.AddLocalAddress(localAddr, addrmgr.UpnpPrio)
 				if err != nil {
 					srvrLog.Warnf("Failed to add UPnP local address %s: %v",
-						na.IP.String(), err)
+						wireNA.IP.String(), err)
 				} else {
 					srvrLog.Warnf("Successfully bound via UPnP to %s",
-						addrmgr.NetAddressKey(na))
+						localAddr.Key)
 					first = false
 				}
 			}
@@ -3290,7 +3495,7 @@ func setupRPCListeners() ([]net.Listener, error) {
 // decred network type specified by chainParams.  Use start to begin accepting
 // connections from peers.
 func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainParams *chaincfg.Params, dataDir string) (*server, error) {
-	amgr := addrmgr.New(cfg.DataDir, dcrdLookup)
+	amgr := addrmgr.New(cfg.DataDir)
 	services := defaultServices
 
 	var listeners []net.Listener
@@ -3612,7 +3817,8 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 				// in the same group so that we are not connecting
 				// to the same network segment at the expense of
 				// others.
-				key := addrmgr.GroupKey(addr.NetAddress())
+				wireAddr := addr.NetAddress()
+				key := addrmgr.GroupKey(wireAddr.IP)
 				if s.OutboundGroupCount(key) != 0 {
 					continue
 				}
@@ -3629,8 +3835,7 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 					continue
 				}
 
-				addrString := addrmgr.NetAddressKey(addr.NetAddress())
-				return addrStringToNetAddr(addrString)
+				return addrStringToNetAddr(wireAddr.Key())
 			}
 
 			return nil, errors.New("no valid connect address")
@@ -3798,7 +4003,8 @@ func initListeners(ctx context.Context, params *chaincfg.Params, amgr *addrmgr.A
 				}
 				eport = uint16(port)
 			}
-			na, err := amgr.HostToNetAddress(host, eport, services)
+
+			na, err := cfg.hostToNetAddress(host, eport, services)
 			if err != nil {
 				srvrLog.Warnf("Not adding %s as externalip: %v", sip, err)
 				continue
@@ -3844,7 +4050,7 @@ func addrStringToNetAddr(addr string) (net.Addr, error) {
 	// Attempt to look up an IP address associated with the parsed host.
 	// The dcrdLookup function will transparently handle performing the
 	// lookup over Tor if necessary.
-	ips, err := dcrdLookup(host)
+	ips, err := cfg.dcrdLookup(host)
 	if err != nil {
 		return nil, err
 	}
@@ -3894,16 +4100,17 @@ func addLocalAddress(addrMgr *addrmgr.AddrManager, addr string, services wire.Se
 				continue
 			}
 
-			netAddr := wire.NewNetAddressIPPort(ifaceIP, uint16(port), services)
+			netAddr := addrmgr.NewNetAddress(ifaceIP, uint16(port),
+				addrmgr.ServiceFlag(services))
 			addrMgr.AddLocalAddress(netAddr, addrmgr.BoundPrio)
 		}
 	} else {
-		netAddr, err := addrMgr.HostToNetAddress(host, uint16(port), services)
+		na, err := cfg.hostToNetAddress(host, uint16(port), services)
 		if err != nil {
 			return err
 		}
 
-		addrMgr.AddLocalAddress(netAddr, addrmgr.BoundPrio)
+		addrMgr.AddLocalAddress(na, addrmgr.BoundPrio)
 	}
 
 	return nil
