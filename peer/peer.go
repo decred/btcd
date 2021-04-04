@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
+	"github.com/decred/dcrd/addrmgr/v2"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/lru"
 	"github.com/decred/dcrd/wire"
@@ -284,12 +285,12 @@ func minUint32(a, b uint32) uint32 {
 
 // newNetAddress attempts to extract the IP address and port from the passed
 // net.Addr interface and create a NetAddress structure using that information.
-func newNetAddress(addr net.Addr, services wire.ServiceFlag) (*wire.NetAddress, error) {
+func newNetAddress(addr net.Addr, services addrmgr.ServiceFlag) (*addrmgr.NetAddress, error) {
 	// addr will be a net.TCPAddr when not using a proxy.
 	if tcpAddr, ok := addr.(*net.TCPAddr); ok {
 		ip := tcpAddr.IP
 		port := uint16(tcpAddr.Port)
-		na := wire.NewNetAddressIPPort(ip, port, services)
+		na := addrmgr.NewNetAddressIPPort(ip, port, services)
 		return na, nil
 	}
 
@@ -300,7 +301,7 @@ func newNetAddress(addr net.Addr, services wire.ServiceFlag) (*wire.NetAddress, 
 			ip = net.ParseIP("0.0.0.0")
 		}
 		port := uint16(proxiedAddr.Port)
-		na := wire.NewNetAddressIPPort(ip, port, services)
+		na := addrmgr.NewNetAddressIPPort(ip, port, services)
 		return na, nil
 	}
 
@@ -316,7 +317,7 @@ func newNetAddress(addr net.Addr, services wire.ServiceFlag) (*wire.NetAddress, 
 	if err != nil {
 		return nil, err
 	}
-	na := wire.NewNetAddressIPPort(ip, uint16(port), services)
+	na := addrmgr.NewNetAddressIPPort(ip, uint16(port), services)
 	return na, nil
 }
 
@@ -385,7 +386,7 @@ type AddrFunc func(remoteAddr *wire.NetAddress) *wire.NetAddress
 // HostToNetAddrFunc is a func which takes a host, port, services and returns
 // the netaddress.
 type HostToNetAddrFunc func(host string, port uint16,
-	services wire.ServiceFlag) (*wire.NetAddress, error)
+	services wire.ServiceFlag) (*addrmgr.NetAddress, error)
 
 // NOTE: The overall data flow of a peer is split into 3 goroutines.  Inbound
 // messages are read via the inHandler goroutine and generally dispatched to
@@ -431,7 +432,7 @@ type Peer struct {
 	inbound bool
 
 	flagsMtx             sync.Mutex // protects the peer flags below
-	na                   *wire.NetAddress
+	na                   *addrmgr.NetAddress
 	id                   int32
 	userAgent            string
 	services             wire.ServiceFlag
@@ -577,7 +578,7 @@ func (p *Peer) ID() int32 {
 // NA returns the peer network address.
 //
 // This function is safe for concurrent access.
-func (p *Peer) NA() *wire.NetAddress {
+func (p *Peer) NA() *addrmgr.NetAddress {
 	p.flagsMtx.Lock()
 	na := p.na
 	p.flagsMtx.Unlock()
@@ -1806,7 +1807,7 @@ func (p *Peer) readRemoteVersionMsg() error {
 	p.protocolVersion = minUint32(p.protocolVersion, p.advertisedProtoVer)
 	p.versionKnown = true
 	p.services = msg.Services
-	p.na.Services = msg.Services
+	p.na.Services = addrmgr.ServiceFlag(msg.Services)
 	p.flagsMtx.Unlock()
 	log.Debugf("Negotiated protocol version %d for peer %s",
 		p.protocolVersion, p)
@@ -1840,6 +1841,37 @@ func (p *Peer) readRemoteVersionMsg() error {
 	return nil
 }
 
+// addrmgrToWireNetAddressExceptProxy converts an address manager network
+// address to a wire network address.  The address' ip must be able to be
+// represented in 16 bytes and the host name must not match the configured
+// proxy host name.  If the address cannot be converted, a nil value is
+// returned.
+func (p *Peer) addrmgrToWireNetAddressExceptProxy(addr *addrmgr.NetAddress) *wire.NetAddress {
+	if addr.Type != addrmgr.IPv4Address &&
+		addr.Type != addrmgr.IPv6Address &&
+		addr.Type != addrmgr.TORv2Address {
+		// Only support network address types that can fit in a 16 byte net.IP
+		return nil
+	}
+
+	// If we are behind a proxy and the connection comes from the proxy then
+	// we return an unroutable address as their address. This is to prevent
+	// leaking the tor proxy address.
+	if p.cfg.Proxy != "" {
+		proxyaddress, _, err := net.SplitHostPort(p.cfg.Proxy)
+		if err != nil {
+			return nil
+		}
+		peerAddress, _, err := net.SplitHostPort(addr.Key())
+		if err != nil || peerAddress == proxyaddress {
+			return nil
+		}
+	}
+
+	return wire.NewNetAddressTimestamp(addr.Timestamp,
+		wire.ServiceFlag(addr.Services), addr.IP, addr.Port)
+}
+
 // localVersionMsg creates a version message that can be used to send to the
 // remote peer.
 func (p *Peer) localVersionMsg() (*wire.MsgVersion, error) {
@@ -1852,18 +1884,14 @@ func (p *Peer) localVersionMsg() (*wire.MsgVersion, error) {
 		}
 	}
 
-	theirNA := p.na
-
-	// If we are behind a proxy and the connection comes from the proxy then
-	// we return an unroutable address as their address. This is to prevent
-	// leaking the tor proxy address.
-	if p.cfg.Proxy != "" {
-		proxyaddress, _, err := net.SplitHostPort(p.cfg.Proxy)
-		// invalid proxy means poorly configured, be on the safe side.
-		if err != nil || p.na.IP.String() == proxyaddress {
-			theirNA = wire.NewNetAddressIPPort(net.IP([]byte{0, 0, 0, 0}), 0,
-				theirNA.Services)
-		}
+	// Attempt to convert the address manager network address to a wire network
+	// address.  If it cannot be converted then create a zero-ip wire network
+	// address to send in the version message.
+	peerNA := p.na
+	theirNA := p.addrmgrToWireNetAddressExceptProxy(peerNA)
+	if theirNA == nil {
+		theirNA = wire.NewNetAddressIPPort(net.IP([]byte{0, 0, 0, 0}), 0,
+			wire.ServiceFlag(peerNA.Services))
 	}
 
 	// Create a wire.NetAddress with only the services set to use as the
@@ -2000,7 +2028,8 @@ func (p *Peer) AssociateConnection(conn net.Conn) {
 		// Set up a NetAddress for the peer to be used with AddrManager.  We
 		// only do this inbound because outbound set this up at connection time
 		// and no point recomputing.
-		na, err := newNetAddress(p.conn.RemoteAddr(), p.services)
+		na, err := newNetAddress(p.conn.RemoteAddr(),
+			addrmgr.ServiceFlag(p.services))
 		if err != nil {
 			log.Errorf("Cannot create remote net address: %v", err)
 			p.Disconnect()
@@ -2097,7 +2126,7 @@ func NewOutboundPeer(cfg *Config, addr string) (*Peer, error) {
 		}
 		p.na = na
 	} else {
-		p.na = wire.NewNetAddressIPPort(net.ParseIP(host), uint16(port), 0)
+		p.na = addrmgr.NewNetAddressIPPort(net.ParseIP(host), uint16(port), 0)
 	}
 
 	return p, nil
