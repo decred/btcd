@@ -8,6 +8,7 @@ package addrmgr
 import (
 	"net"
 	"testing"
+	"time"
 )
 
 // TestIPTypes ensures the various functions which determine the type of an IP
@@ -144,55 +145,64 @@ func TestIPTypes(t *testing.T) {
 func TestGroupKey(t *testing.T) {
 	tests := []struct {
 		name     string
-		ip       string
+		host     string
 		expected string
 	}{
 		// Local addresses.
-		{name: "ipv4 localhost", ip: "127.0.0.1", expected: "local"},
-		{name: "ipv6 localhost", ip: "::1", expected: "local"},
-		{name: "ipv4 zero", ip: "0.0.0.0", expected: "local"},
-		{name: "ipv4 first octet zero", ip: "0.1.2.3", expected: "local"},
+		{name: "ipv4 localhost", host: "127.0.0.1", expected: "local"},
+		{name: "ipv6 localhost", host: "::1", expected: "local"},
+		{name: "ipv4 zero", host: "0.0.0.0", expected: "local"},
+		{name: "ipv4 first octet zero", host: "0.1.2.3", expected: "local"},
 
 		// Unroutable addresses.
-		{name: "ipv4 invalid bcast", ip: "255.255.255.255", expected: "unroutable"},
-		{name: "ipv4 rfc1918 10/8", ip: "10.1.2.3", expected: "unroutable"},
-		{name: "ipv4 rfc1918 172.16/12", ip: "172.16.1.2", expected: "unroutable"},
-		{name: "ipv4 rfc1918 192.168/16", ip: "192.168.1.2", expected: "unroutable"},
-		{name: "ipv6 rfc3849 2001:db8::/32", ip: "2001:db8::1234", expected: "unroutable"},
-		{name: "ipv4 rfc3927 169.254/16", ip: "169.254.1.2", expected: "unroutable"},
-		{name: "ipv6 rfc4193 fc00::/7", ip: "fc00::1234", expected: "unroutable"},
-		{name: "ipv6 rfc4843 2001:10::/28", ip: "2001:10::1234", expected: "unroutable"},
-		{name: "ipv6 rfc4862 fe80::/64", ip: "fe80::1234", expected: "unroutable"},
+		{name: "ipv4 invalid bcast", host: "255.255.255.255", expected: "unroutable"},
+		{name: "ipv4 rfc1918 10/8", host: "10.1.2.3", expected: "unroutable"},
+		{name: "ipv4 rfc1918 172.16/12", host: "172.16.1.2", expected: "unroutable"},
+		{name: "ipv4 rfc1918 192.168/16", host: "192.168.1.2", expected: "unroutable"},
+		{name: "ipv6 rfc3849 2001:db8::/32", host: "2001:db8::1234", expected: "unroutable"},
+		{name: "ipv4 rfc3927 169.254/16", host: "169.254.1.2", expected: "unroutable"},
+		{name: "ipv6 rfc4193 fc00::/7", host: "fc00::1234", expected: "unroutable"},
+		{name: "ipv6 rfc4843 2001:10::/28", host: "2001:10::1234", expected: "unroutable"},
+		{name: "ipv6 rfc4862 fe80::/64", host: "fe80::1234", expected: "unroutable"},
 
 		// IPv4 normal.
-		{name: "ipv4 normal class a", ip: "12.1.2.3", expected: "12.1.0.0"},
-		{name: "ipv4 normal class b", ip: "173.1.2.3", expected: "173.1.0.0"},
-		{name: "ipv4 normal class c", ip: "196.1.2.3", expected: "196.1.0.0"},
+		{name: "ipv4 normal class a", host: "12.1.2.3", expected: "12.1.0.0"},
+		{name: "ipv4 normal class b", host: "173.1.2.3", expected: "173.1.0.0"},
+		{name: "ipv4 normal class c", host: "196.1.2.3", expected: "196.1.0.0"},
 
 		// IPv6/IPv4 translations.
-		{name: "ipv6 rfc3964 with ipv4 encap", ip: "2002:0c01:0203::", expected: "12.1.0.0"},
-		{name: "ipv6 rfc4380 toredo ipv4", ip: "2001:0:1234::f3fe:fdfc", expected: "12.1.0.0"},
-		{name: "ipv6 rfc6052 well-known prefix with ipv4", ip: "64:ff9b::0c01:0203", expected: "12.1.0.0"},
-		{name: "ipv6 rfc6145 translated ipv4", ip: "::ffff:0:0c01:0203", expected: "12.1.0.0"},
+		{name: "ipv6 rfc3964 with ipv4 encap", host: "2002:0c01:0203::", expected: "12.1.0.0"},
+		{name: "ipv6 rfc4380 toredo ipv4", host: "2001:0:1234::f3fe:fdfc", expected: "12.1.0.0"},
+		{name: "ipv6 rfc6052 well-known prefix with ipv4", host: "64:ff9b::0c01:0203", expected: "12.1.0.0"},
+		{name: "ipv6 rfc6145 translated ipv4", host: "::ffff:0:0c01:0203", expected: "12.1.0.0"},
 
-		// Tor.
-		{name: "ipv6 tor onioncat", ip: "fd87:d87e:eb43:1234::5678", expected: "tor:2"},
-		{name: "ipv6 tor onioncat 2", ip: "fd87:d87e:eb43:1245::6789", expected: "tor:2"},
-		{name: "ipv6 tor onioncat 3", ip: "fd87:d87e:eb43:1345::6789", expected: "tor:3"},
+		// TORv2
+		{name: "ipv6 tor onioncat", host: "fd87:d87e:eb43:1234::5678", expected: "torv2:2"},
+		{name: "ipv6 tor onioncat 2", host: "fd87:d87e:eb43:1245::6789", expected: "torv2:2"},
+		{name: "ipv6 tor onioncat 3", host: "fd87:d87e:eb43:1345::6789", expected: "torv2:3"},
+
+		// TORv3
+		{
+			name:     "torv3",
+			host:     "xa4r2iadxm55fbnqgwwi5mymqdcofiu3w6rpbtqn7b2dyn7mgwj64jyd.onion",
+			expected: "torv3:8",
+		},
 
 		// IPv6 normal.
-		{name: "ipv6 normal", ip: "2602:100::1", expected: "2602:100::"},
-		{name: "ipv6 normal 2", ip: "2602:0100::1234", expected: "2602:100::"},
-		{name: "ipv6 hurricane electric", ip: "2001:470:1f10:a1::2", expected: "2001:470:1000::"},
-		{name: "ipv6 hurricane electric 2", ip: "2001:0470:1f10:a1::2", expected: "2001:470:1000::"},
+		{name: "ipv6 normal", host: "2602:100::1", expected: "2602:100::"},
+		{name: "ipv6 normal 2", host: "2602:0100::1234", expected: "2602:100::"},
+		{name: "ipv6 hurricane electric", host: "2001:470:1f10:a1::2", expected: "2001:470:1000::"},
+		{name: "ipv6 hurricane electric 2", host: "2001:0470:1f10:a1::2", expected: "2001:470:1000::"},
 	}
 
-	for i, test := range tests {
-		nip := net.ParseIP(test.ip)
-		na := NewNetAddressIPPort(nip, 8333, sfNodeNetwork)
-		if key := na.GroupKey(); key != test.expected {
-			t.Errorf("TestGroupKey #%d (%s): unexpected group key "+
-				"- got '%s', want '%s'", i, test.name, key, test.expected)
+	ts := time.Now()
+	for _, test := range tests {
+		addrType, addrBytes, _ := ParseHost(test.host)
+		na, _ := NewNetAddressByType(addrType, addrBytes, 8333, ts, sfNodeNetwork)
+		actualKey := na.GroupKey()
+		if actualKey != test.expected {
+			t.Errorf("%q: unexpected group key - got %s, want %s",
+				test.name, actualKey, test.expected)
 		}
 	}
 }

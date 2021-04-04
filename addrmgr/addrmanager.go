@@ -774,6 +774,17 @@ func ParseHost(host string) (NetAddressType, []byte, error) {
 			addrBytes := append(prefix, data...)
 			return TORv2Address, addrBytes, nil
 		}
+		// Check if this is a valid TORv3 address.
+		if len(host) == 62 {
+			torAddressBytes, err := base32.StdEncoding.DecodeString(
+				strings.ToUpper(host[:56]))
+			if err != nil {
+				return UnknownAddressType, nil, err
+			}
+			if pubkey, valid := isTORv3(torAddressBytes); valid {
+				return TORv3Address, pubkey, nil
+			}
+		}
 	}
 
 	if ip := net.ParseIP(host); ip != nil {
@@ -1158,8 +1169,13 @@ func getReachabilityFrom(localAddr, remoteAddr *NetAddress) NetAddressReach {
 		return Unreachable
 	}
 
-	if isOnionCatTor(remoteAddr.IP) {
-		if isOnionCatTor(localAddr.IP) {
+	isRemoteAddrTOR := remoteAddr.Type == TORv2Address ||
+		remoteAddr.Type == TORv3Address
+	isLocalAddrTOR := localAddr.Type == TORv2Address ||
+		localAddr.Type == TORv3Address
+
+	if isRemoteAddrTOR {
+		if isLocalAddrTOR {
 			return Private
 		}
 

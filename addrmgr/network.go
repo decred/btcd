@@ -6,9 +6,16 @@
 package addrmgr
 
 import (
+	"bytes"
 	"fmt"
 	"net"
+
+	"golang.org/x/crypto/sha3"
 )
+
+// torV3VersionByte represents the version byte used when encoding and decoding
+// a torv3 host name.
+const torV3VersionByte = byte(3)
 
 var (
 	// rfc1918Nets specifies the IPv4 private address blocks as defined by
@@ -125,6 +132,7 @@ const (
 	IPv4Address
 	IPv6Address
 	TORv2Address
+	TORv3Address
 )
 
 // NetAddressTypeFlags represents network address types as bit flags.  It is
@@ -140,6 +148,9 @@ const (
 
 	// TORv2AddressFlag represents a TORv2 network address type.
 	TORv2AddressFlag
+
+	// TORv3AddressFlag represents a TORv3 network address type.
+	TORv3AddressFlag
 )
 
 // isAddressTypeFlagSet returns whether the provided network address type
@@ -152,6 +163,8 @@ func isAddressTypeFlagSet(addrType NetAddressType, flags NetAddressTypeFlags) bo
 		return flags&IPv6AddressFlag == IPv6AddressFlag
 	case TORv2Address:
 		return flags&TORv2AddressFlag == TORv2AddressFlag
+	case TORv3Address:
+		return flags&TORv3AddressFlag == TORv3AddressFlag
 	}
 	return false
 }
@@ -247,6 +260,39 @@ func isRFC6598(netIP net.IP) bool {
 	return rfc6598Net.Contains(netIP)
 }
 
+// calcTORv3Checksum returns the checksum bytes given a 32 byte
+// TORv3 public key.
+func calcTORv3Checksum(publicKey []byte) []byte {
+	checkSumInput := []byte(".onion checksum")
+	checkSumInput = append(checkSumInput, publicKey...)
+	checkSumInput = append(checkSumInput, torV3VersionByte)
+	digest := sha3.Sum256(checkSumInput)
+	return digest[:2]
+}
+
+// isTORv3 returns whether or not the passed address is a valid TORv3 address
+// with the checksum and version bytes. If it is valid, it also returns the
+// public key of the tor v3 address.
+func isTORv3(addressBytes []byte) ([]byte, bool) {
+	if len(addressBytes) != 35 {
+		return nil, false
+	}
+
+	version := addressBytes[34]
+	if version != torV3VersionByte {
+		return nil, false
+	}
+
+	publicKey := addressBytes[:32]
+	computedChecksum := calcTORv3Checksum(publicKey)
+	checksum := addressBytes[32:34]
+	if !bytes.Equal(computedChecksum, checksum) {
+		return nil, false
+	}
+
+	return publicKey, true
+}
+
 // isValid returns whether or not the passed address is valid.  The address is
 // considered invalid under the following circumstances:
 // IPv4: It is either a zero or all bits set address.
@@ -304,8 +350,13 @@ func (na *NetAddress) GroupKey() string {
 		return newIP.Mask(net.CIDRMask(16, 32)).String()
 	}
 	if isOnionCatTor(netIP) {
-		// group is keyed off the first 4 bits of the actual onion key.
-		return fmt.Sprintf("tor:%d", netIP[6]&((1<<4)-1))
+		// Group is keyed off the first 4 bits of the actual onion key.
+		return fmt.Sprintf("torv2:%d", netIP[6]&((1<<4)-1))
+	}
+
+	if na.Type == TORv3Address {
+		// Group is keyed off the first 4 bits of the public key.
+		return fmt.Sprintf("torv3:%d", netIP[0]&((1<<4)-1))
 	}
 
 	// OK, so now we know ourselves to be a IPv6 address.

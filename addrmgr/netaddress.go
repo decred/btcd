@@ -57,6 +57,13 @@ func (netAddr *NetAddress) ipString() string {
 	case TORv2Address:
 		base32 := base32.StdEncoding.EncodeToString(netIP[6:])
 		return strings.ToLower(base32) + ".onion"
+	case TORv3Address:
+		addrBytes := netIP
+		checksum := calcTORv3Checksum(addrBytes)
+		addrBytes = append(addrBytes, checksum[:]...)
+		addrBytes = append(addrBytes, torV3VersionByte)
+		base32 := base32.StdEncoding.EncodeToString(addrBytes)
+		return strings.ToLower(base32) + ".onion"
 	}
 	return net.IP(netIP).String()
 }
@@ -107,7 +114,7 @@ func canonicalizeIP(addrType NetAddressType, addrBytes []byte) []byte {
 // deriveNetAddressType attempts to determine the network address type from
 // the address' raw bytes.  If the type cannot be determined, an error is
 // returned.
-func deriveNetAddressType(addrBytes []byte) (NetAddressType, error) {
+func deriveNetAddressType(claimedType NetAddressType, addrBytes []byte) (NetAddressType, error) {
 	len := len(addrBytes)
 	switch {
 	case isIPv4(addrBytes):
@@ -118,6 +125,8 @@ func deriveNetAddressType(addrBytes []byte) (NetAddressType, error) {
 		return TORv2Address, nil
 	case len == 16:
 		return IPv6Address, nil
+	case len == 32 && claimedType == TORv3Address:
+		return TORv3Address, nil
 	}
 	return UnknownAddressType, makeError(ErrUnknownAddressType,
 		"unable to determine address type from raw network address bytes")
@@ -126,7 +135,7 @@ func deriveNetAddressType(addrBytes []byte) (NetAddressType, error) {
 // assertNetAddressTypeValid returns an error if the suggested address type does
 // not appear to match the provided address.
 func assertNetAddressTypeValid(netAddressType NetAddressType, addrBytes []byte) error {
-	derivedAddressType, err := deriveNetAddressType(addrBytes)
+	derivedAddressType, err := deriveNetAddressType(netAddressType, addrBytes)
 	if err != nil {
 		return err
 	}
@@ -186,9 +195,9 @@ func (a *AddrManager) newAddressFromString(addr string) (*NetAddress, error) {
 
 // NewNetAddressIPPort creates a new address manager network address given an
 // ip, port, and the supported service flags for the address.  The provided ip
-/// MUST be a valid IPv4, IPv6, or TORv2 address
+/// MUST be a valid IPv4, IPv6, or TORv2 address.
 func NewNetAddressIPPort(ip net.IP, port uint16, services ServiceFlag) *NetAddress {
-	netAddressType, _ := deriveNetAddressType(ip)
+	netAddressType, _ := deriveNetAddressType(UnknownAddressType, ip)
 	timestamp := time.Unix(time.Now().Unix(), 0)
 	canonicalizedIP := canonicalizeIP(netAddressType, ip)
 	return &NetAddress{

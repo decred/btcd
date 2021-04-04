@@ -36,7 +36,7 @@ require (
 	github.com/jrick/bitset v1.0.0
 	github.com/jrick/logrotate v1.0.0
 	github.com/syndtr/goleveldb v1.0.1-0.20200815110645-5c35d600f0ca
-	golang.org/x/crypto v0.0.0-20200820211705-5c72a883971a
+	golang.org/x/crypto v0.0.0-20210322153248-0c34fe9e7dc2
 	golang.org/x/sync v0.0.0-20200625203802-6e8e738ad208
 	golang.org/x/sys v0.0.0-20201119102817-f84b799fce68
 )

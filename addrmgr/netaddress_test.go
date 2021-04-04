@@ -186,6 +186,13 @@ func TestKey(t *testing.T) {
 			port: 8334,
 			want: "aaaaaaaaaaaaaaaa.onion:8334",
 		},
+
+		// TORv3
+		{
+			host: "xa4r2iadxm55fbnqgwwi5mymqdcofiu3w6rpbtqn7b2dyn7mgwj64jyd.onion",
+			port: 8333,
+			want: "xa4r2iadxm55fbnqgwwi5mymqdcofiu3w6rpbtqn7b2dyn7mgwj64jyd.onion:8333",
+		},
 	}
 
 	timeNow := time.Now()

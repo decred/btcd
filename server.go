@@ -3892,11 +3892,29 @@ func initListeners(ctx context.Context, params *chaincfg.Params, amgr *addrmgr.A
 
 // addrStringToNetAddr takes an address in the form of 'host:port' and returns
 // a net.Addr which maps to the original address with any host names resolved
-// to IP addresses.
+// to IP addresses, if applicable for the respective address type.
 func addrStringToNetAddr(addr string) (net.Addr, error) {
 	host, strPort, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
+	}
+	port, err := strconv.Atoi(strPort)
+	if err != nil {
+		return nil, err
+	}
+
+	// Determine the network that the address belongs to and return early if
+	// a DNS lookup should not be performed for the address.
+	networkID, _, err := addrmgr.ParseHost(host)
+	if err != nil {
+		return nil, err
+	}
+	switch networkID {
+	case addrmgr.TORv3Address:
+		return &simpleAddr{
+			net:  "tcp",
+			addr: addr,
+		}, nil
 	}
 
 	// Attempt to look up an IP address associated with the parsed host.
@@ -3908,11 +3926,6 @@ func addrStringToNetAddr(addr string) (net.Addr, error) {
 	}
 	if len(ips) == 0 {
 		return nil, fmt.Errorf("no addresses found for %s", host)
-	}
-
-	port, err := strconv.Atoi(strPort)
-	if err != nil {
-		return nil, err
 	}
 
 	return &net.TCPAddr{
