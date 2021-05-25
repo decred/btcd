@@ -5,13 +5,10 @@
 package blockchain
 
 import (
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
-	"github.com/decred/dcrd/database/v2"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -19,28 +16,13 @@ import (
 func createTestUtxoBackend(t *testing.T) *LevelDbUtxoBackend {
 	t.Helper()
 
-	// Create a test database.
-	dbPath := filepath.Join(os.TempDir(), t.Name())
-	_ = os.RemoveAll(dbPath)
-	db, err := database.Create("ffldb", dbPath, wire.MainNet)
+	db, teardown, err := createTestUtxoDatabase(t.Name())
 	if err != nil {
 		t.Fatalf("error creating test database: %v", err)
 	}
 	t.Cleanup(func() {
-		os.RemoveAll(dbPath)
+		teardown()
 	})
-	t.Cleanup(func() {
-		db.Close()
-	})
-
-	// Create the utxo set bucket.
-	err = db.Update(func(dbTx database.Tx) error {
-		_, err := dbTx.Metadata().CreateBucketIfNotExists(utxoSetBucketName)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("error creating utxo bucket: %v", err)
-	}
 
 	return NewLevelDbUtxoBackend(db)
 }
@@ -92,10 +74,10 @@ func TestFetchEntryFromBackend(t *testing.T) {
 
 	for _, test := range tests {
 		// Add entries specified by the test to the test backend.
-		err := backend.db.Update(func(dbTx database.Tx) error {
+		err := backend.Update(func(tx UtxoBackendTx) error {
 			for outpoint, serialized := range test.backendEntries {
 				key := outpointKey(outpoint)
-				err := dbTx.Metadata().Bucket(utxoSetBucketName).Put(*key, serialized)
+				err := tx.Put(*key, serialized)
 				if err != nil {
 					return err
 				}
@@ -269,8 +251,8 @@ func TestFetchState(t *testing.T) {
 	for _, test := range tests {
 		// Update the utxo set state in the backend.
 		if test.state != nil {
-			err := backend.db.Update(func(dbTx database.Tx) error {
-				return dbTx.Metadata().Put(utxoSetStateKeyName,
+			err := backend.Update(func(tx UtxoBackendTx) error {
+				return tx.Put(utxoSetStateKey,
 					serializeUtxoSetState(test.state))
 			})
 			if err != nil {
@@ -318,17 +300,8 @@ func TestPutInfo(t *testing.T) {
 
 	for _, test := range tests {
 		if test.backendInfo != nil {
-			// Create the UTXO database info bucket.
-			err := backend.db.Update(func(dbTx database.Tx) error {
-				_, err := dbTx.Metadata().CreateBucketIfNotExists(utxoDbInfoBucketName)
-				return err
-			})
-			if err != nil {
-				t.Fatalf("%q: error creating UTXO bucket: %v", test.name, err)
-			}
-
 			// Update the UTXO backend info.
-			err = backend.PutInfo(test.backendInfo)
+			err := backend.PutInfo(test.backendInfo)
 			if err != nil {
 				t.Fatalf("%q: error putting UTXO backend info: %v", test.name, err)
 			}

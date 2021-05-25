@@ -16,6 +16,9 @@ import (
 	"github.com/decred/dcrd/database/v2"
 	_ "github.com/decred/dcrd/database/v2/ffldb"
 	"github.com/decred/dcrd/dcrutil/v4"
+	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/filter"
+	"github.com/syndtr/goleveldb/leveldb/opt"
 )
 
 // This example demonstrates how to create a new chain instance and use
@@ -40,6 +43,22 @@ func ExampleBlockChain_ProcessBlock() {
 	defer os.RemoveAll(dbPath)
 	defer db.Close()
 
+	// Additionally, create a new database to store the UTXO set.
+	utxoDbPath := filepath.Join(os.TempDir(), "exampleprocessblockutxodb")
+	_ = os.RemoveAll(utxoDbPath)
+	opts := opt.Options{
+		Strict:      opt.DefaultStrict,
+		Compression: opt.NoCompression,
+		Filter:      filter.NewBloomFilter(10),
+	}
+	utxoDb, err := leveldb.OpenFile(utxoDbPath, &opts)
+	if err != nil {
+		fmt.Printf("Failed to create UTXO database: %v\n", err)
+		return
+	}
+	defer os.RemoveAll(utxoDbPath)
+	defer utxoDb.Close()
+
 	// Create a new BlockChain instance using the underlying database for
 	// the main bitcoin network.  This example does not demonstrate some
 	// of the other available configuration options such as specifying a
@@ -53,7 +72,7 @@ func ExampleBlockChain_ProcessBlock() {
 			ChainParams: mainNetParams,
 			TimeSource:  blockchain.NewMedianTime(),
 			UtxoCache: blockchain.NewUtxoCache(&blockchain.UtxoCacheConfig{
-				Backend: blockchain.NewLevelDbUtxoBackend(db),
+				Backend: blockchain.NewLevelDbUtxoBackend(utxoDb),
 				FlushBlockDB: func() error {
 					return nil
 				},

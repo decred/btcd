@@ -15,6 +15,7 @@ import (
 	"math"
 	mrand "math/rand"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -30,6 +31,9 @@ import (
 	"github.com/decred/dcrd/txscript/v4"
 	"github.com/decred/dcrd/txscript/v4/sign"
 	"github.com/decred/dcrd/wire"
+	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/filter"
+	"github.com/syndtr/goleveldb/leveldb/opt"
 )
 
 const (
@@ -100,6 +104,34 @@ func createTestDatabase(dbName string, dbType string, net wire.CurrencyNet) (dat
 	return db, teardown, nil
 }
 
+// createTestUtxoDatabase creates a test UTXO database with the provided
+// database name.
+func createTestUtxoDatabase(dbName string) (*leveldb.DB, func(), error) {
+	// Construct the database filepath and remove all from that path.
+	dbPath := filepath.Join(os.TempDir(), dbName)
+	_ = os.RemoveAll(dbPath)
+
+	// Open the database (will create it if needed).
+	opts := opt.Options{
+		Strict:      opt.DefaultStrict,
+		Compression: opt.NoCompression,
+		Filter:      filter.NewBloomFilter(10),
+	}
+	db, err := leveldb.OpenFile(dbPath, &opts)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Setup a teardown function for cleaning up.  This function is returned to
+	// the caller to be invoked when it is done testing.
+	teardown := func() {
+		_ = db.Close()
+		_ = os.RemoveAll(dbPath)
+	}
+
+	return db, teardown, nil
+}
+
 // chainSetup is used to create a new db and chain instance with the genesis
 // block already inserted.  In addition to the new chain instance, it returns
 // a teardown function the caller should invoke when done testing to clean up.
@@ -115,8 +147,7 @@ func chainSetup(dbName string, params *chaincfg.Params) (*BlockChain, func(), er
 	}
 
 	// Create a test UTXO database.
-	utxoDb, teardownUtxoDb, err := createTestDatabase(dbName+"_utxo", testDbType,
-		blockDataNet)
+	utxoDb, teardownUtxoDb, err := createTestUtxoDatabase(dbName + "_utxo")
 	if err != nil {
 		teardownDb()
 		return nil, nil, err
