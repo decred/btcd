@@ -100,6 +100,9 @@ const (
 	// delete a value via a cursor when it points to a nested bucket.
 	ErrIncompatibleValue = ErrorKind("ErrIncompatibleValue")
 
+	// ErrValueNotFound indicates no value found for the provided key.
+	ErrValueNotFound = ErrorKind("ErrValueNotFound")
+
 	// ------------------------------------------
 	// Errors related to block I/O operations.
 	// ------------------------------------------

@@ -34,6 +34,7 @@ func TestErrorKindStringer(t *testing.T) {
 		{ErrKeyTooLarge, "ErrKeyTooLarge"},
 		{ErrValueTooLarge, "ErrValueTooLarge"},
 		{ErrIncompatibleValue, "ErrIncompatibleValue"},
+		{ErrValueNotFound, "ErrValueNotFound"},
 		{ErrBlockNotFound, "ErrBlockNotFound"},
 		{ErrBlockExists, "ErrBlockExists"},
 		{ErrBlockRegionInvalid, "ErrBlockRegionInvalid"},
