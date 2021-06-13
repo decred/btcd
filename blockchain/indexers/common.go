@@ -173,3 +173,239 @@ func interruptRequested(ctx context.Context) bool {
 func makeDbErr(kind database.ErrorKind, desc string) database.Error {
 	return database.Error{Err: kind, Description: desc}
 }
+
+
+// dbPutIndexerTip uses an existing database transaction to update or add the
+// current tip for the given index to the provided values.
+func dbPutIndexerTip(dbTx database.Tx, idxKey []byte, hash *chainhash.Hash, height int32) error {
+	serialized := make([]byte, chainhash.HashSize+4)
+	copy(serialized, hash[:])
+	byteOrder.PutUint32(serialized[chainhash.HashSize:], uint32(height))
+
+	indexesBucket := dbTx.Metadata().Bucket(indexTipsBucketName)
+	return indexesBucket.Put(idxKey, serialized)
+}
+
+// dbFetchIndexerTip uses an existing database transaction to retrieve the
+// hash and height of the current tip for the provided index.
+func dbFetchIndexerTip(dbTx database.Tx, idxKey []byte) (*chainhash.Hash, int32, error) {
+	indexesBucket := dbTx.Metadata().Bucket(indexTipsBucketName)
+	if indexesBucket == nil {
+		str := fmt.Sprintf("%s bucket not found", string(indexTipsBucketName))
+		return nil, 0, makeDbErr(database.ErrBucketNotFound, str)
+	}
+	serialized := indexesBucket.Get(idxKey)
+	if len(serialized) == 0 {
+		str := fmt.Sprintf("no index tip value found for %s ", string(idxKey))
+		return nil, 0, makeDbErr(database.ErrValueNotFound, str)
+	}
+	if len(serialized) < chainhash.HashSize+4 {
+		str := fmt.Sprintf("unexpected end of data for "+
+			"index %q tip", string(idxKey))
+		return nil, 0, makeDbErr(database.ErrCorruption, str)
+	}
+
+	var hash chainhash.Hash
+	copy(hash[:], serialized[:chainhash.HashSize])
+	height := int32(byteOrder.Uint32(serialized[chainhash.HashSize:]))
+	return &hash, height, nil
+}
+
+// indexVersionKey returns the key for an index which houses the current version
+// of the index.
+func indexVersionKey(idxKey []byte) []byte {
+	verKey := make([]byte, len(idxKey)+1)
+	verKey[0] = 'v'
+	copy(verKey[1:], idxKey)
+	return verKey
+}
+
+// dbPutIndexerVersion uses an existing database transaction to update the
+// version for the given index to the provided value.
+func dbPutIndexerVersion(dbTx database.Tx, idxKey []byte, version uint32) error {
+	serialized := make([]byte, 4)
+	byteOrder.PutUint32(serialized[0:4], version)
+
+	indexesBucket := dbTx.Metadata().Bucket(indexTipsBucketName)
+	return indexesBucket.Put(indexVersionKey(idxKey), serialized)
+}
+
+// existsIndex returns whether the index keyed by idxKey exists in the database.
+func existsIndex(db database.DB, idxKey []byte, idxName string) (bool, error) {
+	var exists bool
+	err := db.View(func(dbTx database.Tx) error {
+		indexesBucket := dbTx.Metadata().Bucket(indexTipsBucketName)
+		if indexesBucket != nil && indexesBucket.Get(idxKey) != nil {
+			exists = true
+		}
+		return nil
+	})
+	return exists, err
+}
+
+// incrementalFlatDrop uses multiple database updates to remove key/value pairs
+// saved to a flat index.
+func incrementalFlatDrop(ctx context.Context, db database.DB, idxKey []byte, idxName string) error {
+	const maxDeletions = 2000000
+	var totalDeleted uint64
+	for numDeleted := maxDeletions; numDeleted == maxDeletions; {
+		numDeleted = 0
+		err := db.Update(func(dbTx database.Tx) error {
+			bucket := dbTx.Metadata().Bucket(idxKey)
+			cursor := bucket.Cursor()
+			for ok := cursor.First(); ok; ok = cursor.Next() &&
+				numDeleted < maxDeletions {
+
+				if err := cursor.Delete(); err != nil {
+					return err
+				}
+				numDeleted++
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+
+		if numDeleted > 0 {
+			totalDeleted += uint64(numDeleted)
+			log.Infof("Deleted %d keys (%d total) from %s",
+				numDeleted, totalDeleted, idxName)
+		}
+
+		if interruptRequested(ctx) {
+			return errInterruptRequested
+		}
+	}
+	return nil
+}
+
+// indexDropKey returns the key for an index which indicates it is in the
+// process of being dropped.
+func indexDropKey(idxKey []byte) []byte {
+	dropKey := make([]byte, len(idxKey)+1)
+	dropKey[0] = 'd'
+	copy(dropKey[1:], idxKey)
+	return dropKey
+}
+
+// dropIndexMetadata drops the passed index from the database by removing the
+// top level bucket for the index, the index tip, and any in-progress drop flag.
+func dropIndexMetadata(db database.DB, idxKey []byte, idxName string) error {
+	return db.Update(func(dbTx database.Tx) error {
+		meta := dbTx.Metadata()
+		indexesBucket := meta.Bucket(indexTipsBucketName)
+		err := indexesBucket.Delete(idxKey)
+		if err != nil {
+			return err
+		}
+
+		err = meta.DeleteBucket(idxKey)
+		if err != nil && !errors.Is(err, database.ErrBucketNotFound) {
+			return err
+		}
+
+		err = indexesBucket.Delete(indexVersionKey(idxKey))
+		if err != nil {
+			return err
+		}
+
+		return indexesBucket.Delete(indexDropKey(idxKey))
+	})
+}
+
+// dropFlatIndex incrementally drops the passed index from the database.  Since
+// indexes can be massive, it deletes the index in multiple database
+// transactions in order to keep memory usage to reasonable levels.  For this
+// algorithm to work, the index must be "flat" (have no nested buckets).  It
+// also marks the drop in progress so the drop can be resumed if it is stopped
+// before it is done before the index can be used again.
+func dropFlatIndex(ctx context.Context, db database.DB, idxKey []byte, idxName string) error {
+	// Nothing to do if the index doesn't already exist.
+	exists, err := existsIndex(db, idxKey, idxName)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		log.Infof("Not dropping %s because it does not exist", idxName)
+		return nil
+	}
+
+	log.Infof("Dropping all %s entries.  This might take a while...",
+		idxName)
+
+	// Mark that the index is in the process of being dropped so that it
+	// can be resumed on the next start if interrupted before the process is
+	// complete.
+	err = markIndexDeletion(db, idxKey)
+	if err != nil {
+		return err
+	}
+
+	// Since the indexes can be so large, attempting to simply delete
+	// the bucket in a single database transaction would result in massive
+	// memory usage and likely crash many systems due to ulimits.  In order
+	// to avoid this, use a cursor to delete a maximum number of entries out
+	// of the bucket at a time.
+	err = incrementalFlatDrop(ctx, db, idxKey, idxName)
+	if err != nil {
+		return err
+	}
+
+	// Remove the index tip, version, bucket, and in-progress drop flag now that
+	// all index entries have been removed.
+	err = dropIndexMetadata(db, idxKey, idxName)
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Dropped %s", idxName)
+	return nil
+}
+
+// dropIndex drops the passed index from the database without using incremental
+// deletion.  This should be used to drop indexes containing nested buckets,
+// which can not be deleted with dropFlatIndex.
+func dropIndex(db database.DB, idxKey []byte, idxName string) error {
+	// Nothing to do if the index doesn't already exist.
+	exists, err := existsIndex(db, idxKey, idxName)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		log.Infof("Not dropping %s because it does not exist", idxName)
+		return nil
+	}
+
+	log.Infof("Dropping all %s entries.  This might take a while...",
+		idxName)
+
+	// Mark that the index is in the process of being dropped so that it
+	// can be resumed on the next start if interrupted before the process is
+	// complete.
+	err = markIndexDeletion(db, idxKey)
+	if err != nil {
+		return err
+	}
+
+	// Remove the index tip, version, bucket, and in-progress drop flag.
+	// Removing the index bucket also recursively removes all values saved to
+	// the index.
+	err = dropIndexMetadata(db, idxKey, idxName)
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Dropped %s", idxName)
+	return nil
+}
+
+// markIndexDeletion marks the index identified by idxKey for deletion.  Marking
+// an index for deletion allows deletion to resume next startup if an
+// incremental deletion was interrupted.
+func markIndexDeletion(db database.DB, idxKey []byte) error {
+	return db.Update(func(dbTx database.Tx) error {
+		indexesBucket := dbTx.Metadata().Bucket(indexTipsBucketName)
+		return indexesBucket.Put(indexDropKey(idxKey), idxKey)
+	})
+}
