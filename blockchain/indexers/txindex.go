@@ -9,8 +9,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/chaincfg/v3"
 	"github.com/decred/dcrd/database/v2"
 	"github.com/decred/dcrd/dcrutil/v4"
 	"github.com/decred/dcrd/wire"
@@ -322,8 +324,20 @@ func dbRemoveTxIndexEntries(dbTx database.Tx, block *dcrutil.Block) error {
 // TxIndex implements a transaction by hash index.  That is to say, it supports
 // querying all transactions by their hash.
 type TxIndex struct {
-	db         database.DB
 	curBlockID uint32
+
+	// These fields provide access to the chain queryer and the
+	// database of the index.
+	db    database.DB
+	chain ChainQueryer
+
+	// These fields track the notification subscription for the index
+	// and its subscribers.
+	sub         *IndexSubscription
+	subscribers map[chan bool]struct{}
+
+	mtx    sync.Mutex
+	cancel context.CancelFunc
 }
 
 // Ensure the TxIndex type implements the Indexer interface.
@@ -334,7 +348,31 @@ var _ Indexer = (*TxIndex)(nil)
 // disconnecting blocks.
 //
 // This is part of the Indexer interface.
-func (idx *TxIndex) Init() error {
+func (idx *TxIndex) Init(ctx context.Context, chainParams *chaincfg.Params) error {
+	if interruptRequested(ctx) {
+		return errInterruptRequested
+	}
+
+	// Finish any drops that were previously interrupted.
+	if err := finishDrop(ctx, idx); err != nil {
+		return err
+	}
+
+	// Create the initial state for the index as needed.
+	if err := createIndex(idx, &chainParams.GenesisHash); err != nil {
+		return err
+	}
+
+	// Upgrade the index as needed.
+	if err := upgradeIndex(ctx, idx, &chainParams.GenesisHash); err != nil {
+		return err
+	}
+
+	// Recover the tx index and its dependents to the main chain if needed.
+	if err := recover(ctx, idx); err != nil {
+		return err
+	}
+
 	// Find the latest known block id field for the internal block id
 	// index and initialize it.  This is done because it's a lot more
 	// efficient to do a single search at initialize time than it is to
@@ -413,9 +451,59 @@ func (idx *TxIndex) Version() uint32 {
 	return txIndexVersion
 }
 
-// Create is invoked when the indexer manager determines the index needs
-// to be created for the first time.  It creates the buckets for the hash-based
-// transaction index and the internal block ID indexes.
+// DB returns the database of the index.
+//
+// This is part of the Indexer interface.
+func (idx *TxIndex) DB() database.DB {
+	return idx.db
+}
+
+// Queryer returns the chain queryer.
+//
+// This is part of the Indexer interface.
+func (idx *TxIndex) Queryer() ChainQueryer {
+	return idx.chain
+}
+
+// Tip returns the current tip of the index.
+//
+// This is part of the Indexer interface.
+func (idx *TxIndex) Tip() (int64, *chainhash.Hash, error) {
+	return tip(idx.db, idx.Key())
+}
+
+// IndexSubscription returns the subscription for index updates.
+//
+// This is part of the Indexer interface.
+func (idx *TxIndex) IndexSubscription() *IndexSubscription {
+	return idx.sub
+}
+
+// Subscribers returns all client channels waiting for the next index update.
+//
+// This is part of the Indexer interface.
+func (idx *TxIndex) Subscribers() map[chan bool]struct{} {
+	idx.mtx.Lock()
+	defer idx.mtx.Unlock()
+	return idx.subscribers
+}
+
+// WaitForSync subscribes clients for the next index sync update.
+//
+// This is part of the Indexer interface.
+func (idx *TxIndex) WaitForSync() chan bool {
+	c := make(chan bool)
+
+	idx.mtx.Lock()
+	idx.subscribers[c] = struct{}{}
+	idx.mtx.Unlock()
+
+	return c
+}
+
+// Create is invoked when the index is created for the first time.  It
+// creates the buckets for the hash-based transaction index and the
+// internal block ID indexes.
 //
 // This is part of the Indexer interface.
 func (idx *TxIndex) Create(dbTx database.Tx) error {
@@ -430,12 +518,9 @@ func (idx *TxIndex) Create(dbTx database.Tx) error {
 	return err
 }
 
-// ConnectBlock is invoked by the index manager when a new block has been
-// connected to the main chain.  This indexer adds a hash-to-transaction mapping
-// for every transaction in the passed block.
-//
-// This is part of the Indexer interface.
-func (idx *TxIndex) ConnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, _ PrevScripter, isTreasuryEnabled bool) error {
+// connectBlock adds a hash-to-transaction mapping for every transaction in
+// the passed block.
+func (idx *TxIndex) connectBlock(dbTx database.Tx, block, parent *dcrutil.Block, _ PrevScripter, _ bool) error {
 	// NOTE: The fact that the block can disapprove the regular tree of the
 	// previous block is ignored for this index because even though the
 	// disapproved transactions no longer apply spend semantics, they still
@@ -466,15 +551,14 @@ func (idx *TxIndex) ConnectBlock(dbTx database.Tx, block, parent *dcrutil.Block,
 		return err
 	}
 	idx.curBlockID = newBlockID
-	return nil
+
+	// Update the current index tip.
+	return dbPutIndexerTip(dbTx, idx.Key(), block.Hash(), int32(block.Height()))
 }
 
-// DisconnectBlock is invoked by the index manager when a block has been
-// disconnected from the main chain.  This indexer removes the
-// hash-to-transaction mapping for every transaction in the block.
-//
-// This is part of the Indexer interface.
-func (idx *TxIndex) DisconnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, _ PrevScripter, isTreasuryEnabled bool) error {
+// disconnectBlock removes the hash-to-transaction mapping for every
+// transaction in the passed block.
+func (idx *TxIndex) disconnectBlock(dbTx database.Tx, block, parent *dcrutil.Block, _ PrevScripter, _ bool) error {
 	// NOTE: The fact that the block can disapprove the regular tree of the
 	// previous block is ignored when disconnecting blocks because it is also
 	// ignored when connecting the block.  See the comments in ConnectBlock for
@@ -491,7 +575,10 @@ func (idx *TxIndex) DisconnectBlock(dbTx database.Tx, block, parent *dcrutil.Blo
 		return err
 	}
 	idx.curBlockID--
-	return nil
+
+	// Update the current index tip.
+	return dbPutIndexerTip(dbTx, idx.Key(), &block.MsgBlock().Header.PrevBlock,
+		int32(block.Height()-1))
 }
 
 // Entry returns details for the provided transaction hash from the transaction
@@ -513,12 +600,29 @@ func (idx *TxIndex) Entry(hash *chainhash.Hash) (*TxIndexEntry, error) {
 // NewTxIndex returns a new instance of an indexer that is used to create a
 // mapping of the hashes of all transactions in the blockchain to the respective
 // block, location within the block, and size of the transaction.
-//
-// It implements the Indexer interface which plugs into the IndexManager that in
-// turn is used by the blockchain package.  This allows the index to be
-// seamlessly maintained along with the chain.
-func NewTxIndex(db database.DB) *TxIndex {
-	return &TxIndex{db: db}
+func NewTxIndex(subscriber *IndexSubscriber, db database.DB, chain ChainQueryer) (*TxIndex, error) {
+	idx := &TxIndex{
+		db:          db,
+		chain:       chain,
+		subscribers: make(map[chan bool]struct{}),
+		cancel:      subscriber.cancel,
+	}
+
+	// The transaction index is an optional index. It has no prequisite and
+	// is updated asynchronously.
+	sub, err := subscriber.Subscribe(idx, noPrereqs)
+	if err != nil {
+		return nil, err
+	}
+
+	idx.sub = sub
+
+	err = idx.Init(subscriber.ctx, chain.ChainParams())
+	if err != nil {
+		return nil, err
+	}
+
+	return idx, nil
 }
 
 // dropBlockIDIndex drops the internal block id index.
@@ -598,4 +702,32 @@ func DropTxIndex(ctx context.Context, db database.DB) error {
 // dropped when it exists.
 func (*TxIndex) DropIndex(ctx context.Context, db database.DB) error {
 	return DropTxIndex(ctx, db)
+}
+
+// ProcessNotification indexes the provided notification based on its
+// notification type.
+//
+// This is part of the Indexer interface.
+func (idx *TxIndex) ProcessNotification(dbTx database.Tx, ntfn *IndexNtfn) error {
+	switch ntfn.NtfnType {
+	case ConnectNtfn:
+		err := idx.connectBlock(dbTx, ntfn.Block, ntfn.Parent,
+			ntfn.PrevScripts, ntfn.IsTreasuryEnabled)
+		if err != nil {
+			return fmt.Errorf("%s: unable to connect block: %v", idx.Name(), err)
+		}
+
+	case DisconnectNtfn:
+		err := idx.disconnectBlock(dbTx, ntfn.Block, ntfn.Parent,
+			ntfn.PrevScripts, ntfn.IsTreasuryEnabled)
+		if err != nil {
+			log.Errorf("%s: unable to disconnect block: %v", idx.Name(), err)
+		}
+
+	default:
+		return fmt.Errorf("%s: unknown notification type received: %d",
+			idx.Name(), ntfn.NtfnType)
+	}
+
+	return nil
 }
