@@ -556,6 +556,15 @@ type FiltererV2 interface {
 // ExistsAddresser may be nil. The RPC server must check for the presence of an
 // ExistsAddresser before calling methods associated with it.
 type ExistsAddresser interface {
+	// Name returns the human-readable name of the index.
+	Name() string
+
+	// Tip returns the current index tip.
+	Tip() (int64, *chainhash.Hash, error)
+
+	// WaitForSync subscribes clients for the next index sync update.
+	WaitForSync() chan bool
+
 	// ExistsAddress returns whether or not an address has been seen before.
 	ExistsAddress(addr stdaddr.Address) (bool, error)
 
@@ -603,6 +612,15 @@ type TxMempooler interface {
 // The interface contract requires that all of these methods are safe for
 // concurrent access.
 type AddrIndexer interface {
+	// Name returns the human-readable name of the index.
+	Name() string
+
+	// Tip returns the current index tip.
+	Tip() (int64, *chainhash.Hash, error)
+
+	// WaitForSync subscribes clients for the next index sync update.
+	WaitForSync() chan bool
+
 	// EntriesForAddress returns a slice of details which identify each transaction,
 	// including a block region, that involves the passed address according to the
 	// specified number to skip, number requested, and whether or not the results
@@ -627,6 +645,15 @@ type AddrIndexer interface {
 // The interface contract requires that all of these methods are safe for
 // concurrent access.
 type TxIndexer interface {
+	// Name returns the human-readable name of the index.
+	Name() string
+
+	// Tip returns the current index tip.
+	Tip() (int64, *chainhash.Hash, error)
+
+	// WaitForSync subscribes clients for the next index sync update.
+	WaitForSync() chan bool
+
 	// Entry returns details for the provided transaction hash from the transaction
 	// index.  The block region contained in the result can in turn be used to load
 	// the raw transaction bytes.  When there is no entry for the provided hash, nil

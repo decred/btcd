@@ -552,6 +552,29 @@ type testExistsAddresser struct {
 	existsAddressErr   error
 	existsAddresses    []bool
 	existsAddressesErr error
+	tipHeight          int64
+	tipHash            *chainhash.Hash
+	tipErr             error
+	signalOnWait       bool
+}
+
+// Name returns the human-readable name of the index.
+func (e *testExistsAddresser) Name() string {
+	return "testExistsAddresser"
+}
+
+// Tip returns the current index tip.
+func (e *testExistsAddresser) Tip() (int64, *chainhash.Hash, error) {
+	return e.tipHeight, e.tipHash, e.tipErr
+}
+
+// WaitForSync subscribes clients for the next index sync update.
+func (e *testExistsAddresser) WaitForSync() chan bool {
+	c := make(chan bool)
+	if e.signalOnWait {
+		go close(c)
+	}
+	return c
 }
 
 // ExistsAddress returns a mocked bool representing whether or not an address
@@ -573,6 +596,29 @@ type testAddrIndexer struct {
 	entriesForAddressSkipped  uint32
 	entriesForAddressErr      error
 	unconfirmedTxnsForAddress []*dcrutil.Tx
+	tipHeight                 int64
+	tipHash                   *chainhash.Hash
+	tipErr                    error
+	signalOnWait              bool
+}
+
+// Name returns the human-readable name of the index.
+func (a *testAddrIndexer) Name() string {
+	return "testAddrIndexer"
+}
+
+// Tip returns the current index tip.
+func (a *testAddrIndexer) Tip() (int64, *chainhash.Hash, error) {
+	return a.tipHeight, a.tipHash, a.tipErr
+}
+
+// WaitForSync subscribes clients for the next index sync update.
+func (a *testAddrIndexer) WaitForSync() chan bool {
+	c := make(chan bool)
+	if a.signalOnWait {
+		close(c)
+	}
+	return c
 }
 
 // EntriesForAddress returns a mocked slice of indexers.TxIndexEntry that
@@ -592,7 +638,30 @@ func (a *testAddrIndexer) UnconfirmedTxnsForAddress(addr stdaddr.Address) []*dcr
 // testTxIndexer provides a mock transaction indexer by implementing the
 // TxIndexer interface.
 type testTxIndexer struct {
-	entry func(hash *chainhash.Hash) (*indexers.TxIndexEntry, error)
+	entry        func(hash *chainhash.Hash) (*indexers.TxIndexEntry, error)
+	tipHeight    int64
+	tipHash      *chainhash.Hash
+	tipErr       error
+	signalOnWait bool
+}
+
+// Name returns the human-readable name of the index.
+func (t *testTxIndexer) Name() string {
+	return "testTxIndexer"
+}
+
+// Tip returns the current index tip.
+func (t *testTxIndexer) Tip() (int64, *chainhash.Hash, error) {
+	return t.tipHeight, t.tipHash, t.tipErr
+}
+
+// WaitForSync subscribes clients for the next index sync update.
+func (t *testTxIndexer) WaitForSync() chan bool {
+	c := make(chan bool)
+	if t.signalOnWait {
+		close(c)
+	}
+	return c
 }
 
 // Entry returns mocked details for the provided transaction hash from the
@@ -1547,7 +1616,12 @@ func defaultMockAddrManager() *testAddrManager {
 // *testExistsAddresser, and then setting rpcTest.mockExistsAddresser as that
 // *testExistsAddresser.
 func defaultMockExistsAddresser() *testExistsAddresser {
-	return &testExistsAddresser{}
+	bestHash := block432100.Header.BlockHash()
+	return &testExistsAddresser{
+		tipHeight:    int64(block432100.Header.Height),
+		tipHash:      &bestHash,
+		signalOnWait: true,
+	}
 }
 
 // defaultMockAddrIndexer provides a default mock address indexer to be
@@ -1556,7 +1630,12 @@ func defaultMockExistsAddresser() *testExistsAddresser {
 // *testAddrIndexer, and then setting rpcTest.mockAddrIndexer as that
 // *testAddrIndexer.
 func defaultMockAddrIndexer() *testAddrIndexer {
-	return &testAddrIndexer{}
+	bestHash := block432100.Header.BlockHash()
+	return &testAddrIndexer{
+		tipHeight:    int64(block432100.Header.Height),
+		tipHash:      &bestHash,
+		signalOnWait: true,
+	}
 }
 
 // defaultMockTxIndexer provides a default mock transaction indexer to be
@@ -1565,7 +1644,12 @@ func defaultMockAddrIndexer() *testAddrIndexer {
 // *testTxIndexer, and then setting rpcTest.mockTxIndexer as that
 // *testTxIndexer.
 func defaultMockTxIndexer() *testTxIndexer {
+	bestHeight := int64(block432100.Header.Height)
+	bestHash := block432100.Header.BlockHash()
 	return &testTxIndexer{
+		tipHeight:    bestHeight,
+		tipHash:      &bestHash,
+		signalOnWait: true,
 		entry: func(hash *chainhash.Hash) (*indexers.TxIndexEntry, error) {
 			return nil, nil
 		},
@@ -2897,11 +2981,24 @@ func TestHandleExistsAddress(t *testing.T) {
 
 	validAddr := "DcurAwesomeAddressmqDctW5wJCW1Cn2MF"
 	testRPCServerHandler(t, []rpcTest{{
-		name:    "handleExistsAddress: ok",
+		name:    "handleExistsAddress: ok, index is synced",
 		handler: handleExistsAddress,
 		cmd: &types.ExistsAddressCmd{
 			Address: validAddr,
 		},
+		result: false,
+	}, {
+		name:    "handleExistsAddress: ok, wait for sync",
+		handler: handleExistsAddress,
+		cmd: &types.ExistsAddressCmd{
+			Address: validAddr,
+		},
+		mockExistsAddresser: func() *testExistsAddresser {
+			existsAddrIndexer := defaultMockExistsAddresser()
+			existsAddrIndexer.tipHash = &zeroHash
+			existsAddrIndexer.signalOnWait = true
+			return existsAddrIndexer
+		}(),
 		result: false,
 	}, {
 		name:    "handleExistsAddress: exist address indexing not enabled",
@@ -2920,6 +3017,47 @@ func TestHandleExistsAddress(t *testing.T) {
 		},
 		wantErr: true,
 		errCode: dcrjson.ErrRPCInvalidAddressOrKey,
+	}, {
+		name:    "handleExistsAddress: unable to fetch index tip",
+		handler: handleExistsAddress,
+		cmd: &types.ExistsAddressCmd{
+			Address: validAddr,
+		},
+		mockExistsAddresser: func() *testExistsAddresser {
+			existsAddrIndexer := defaultMockExistsAddresser()
+			existsAddrIndexer.tipErr = errors.New("unable to fetch index tip")
+			return existsAddrIndexer
+		}(),
+		wantErr: true,
+		errCode: dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleExistsAddress: index is not synced",
+		handler: handleExistsAddress,
+		cmd: &types.ExistsAddressCmd{
+			Address: validAddr,
+		},
+		mockExistsAddresser: func() *testExistsAddresser {
+			bestHeight := int64(block432100.Header.Height)
+			existsAddrIndexer := defaultMockExistsAddresser()
+			existsAddrIndexer.tipHeight = bestHeight - 6
+			return existsAddrIndexer
+		}(),
+		wantErr: true,
+		errCode: dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleExistsAddress: index is not synced after syncWait",
+		handler: handleExistsAddress,
+		cmd: &types.ExistsAddressCmd{
+			Address: validAddr,
+		},
+		mockExistsAddresser: func() *testExistsAddresser {
+			existsAddrIndexer := defaultMockExistsAddresser()
+			existsAddrIndexer.tipHash = &zeroHash
+			existsAddrIndexer.signalOnWait = false
+			return existsAddrIndexer
+		}(),
+		wantErr: true,
+		errCode: dcrjson.ErrRPCInternal.Code,
 	}, {
 		name:    "handleExistsAddress: ExistsAddress error",
 		handler: handleExistsAddress,
@@ -2957,6 +3095,20 @@ func TestHandleExistsAddresses(t *testing.T) {
 		}(),
 		result: existsStr,
 	}, {
+		name:    "handleExistsAddresses: ok, wait for sync",
+		handler: handleExistsAddresses,
+		cmd: &types.ExistsAddressesCmd{
+			Addresses: validAddrs,
+		},
+		mockExistsAddresser: func() *testExistsAddresser {
+			existsAddrIndexer := defaultMockExistsAddresser()
+			existsAddrIndexer.existsAddresses = existsSlice
+			existsAddrIndexer.tipHash = &zeroHash
+			existsAddrIndexer.signalOnWait = true
+			return existsAddrIndexer
+		}(),
+		result: existsStr,
+	}, {
 		name:    "handleExistsAddresses: exist address indexing not enabled",
 		handler: handleExistsAddresses,
 		cmd: &types.ExistsAddressesCmd{
@@ -2974,7 +3126,48 @@ func TestHandleExistsAddresses(t *testing.T) {
 		wantErr: true,
 		errCode: dcrjson.ErrRPCInvalidAddressOrKey,
 	}, {
-		name:    "handleExistsAddresses: ExistsAddresses error",
+		name:    "handleExistsAddresses: unable to fetch index tip",
+		handler: handleExistsAddresses,
+		cmd: &types.ExistsAddressesCmd{
+			Addresses: validAddrs,
+		},
+		mockExistsAddresser: func() *testExistsAddresser {
+			existsAddrIndexer := defaultMockExistsAddresser()
+			existsAddrIndexer.tipErr = errors.New("unable to fetch index tip")
+			return existsAddrIndexer
+		}(),
+		wantErr: true,
+		errCode: dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleExistsAddresses: index is not synced",
+		handler: handleExistsAddresses,
+		cmd: &types.ExistsAddressesCmd{
+			Addresses: validAddrs,
+		},
+		mockExistsAddresser: func() *testExistsAddresser {
+			bestHeight := int64(block432100.Header.Height)
+			existsAddrIndexer := defaultMockExistsAddresser()
+			existsAddrIndexer.tipHeight = bestHeight - 6
+			return existsAddrIndexer
+		}(),
+		wantErr: true,
+		errCode: dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleExistsAddresses: index is not synced after syncWait",
+		handler: handleExistsAddresses,
+		cmd: &types.ExistsAddressesCmd{
+			Addresses: validAddrs,
+		},
+		mockExistsAddresser: func() *testExistsAddresser {
+			existsAddrIndexer := defaultMockExistsAddresser()
+			existsAddrIndexer.tipHash = &zeroHash
+			existsAddrIndexer.signalOnWait = false
+			return existsAddrIndexer
+		}(),
+		wantErr: true,
+		errCode: dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleExistsAddresseses: ExistsAddresses error",
 		handler: handleExistsAddresses,
 		cmd: &types.ExistsAddressesCmd{
 			Addresses: validAddrs,
@@ -5637,6 +5830,27 @@ func TestHandleSearchRawTransactions(t *testing.T) {
 		mockTxIndexer:   txIndexer,
 		result:          result,
 	}, {
+		name:    "handleSearchRawTransactions: ok, wait for sync",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(0),
+		},
+		mockAddrIndexer: func() *testAddrIndexer {
+			addrIndexer := defaultMockAddrIndexer()
+			addrIndexer.entriesForAddress = entriesForAddress
+			addrIndexer.unconfirmedTxnsForAddress = unconfirmedTxnsForAddress
+			addrIndexer.tipHash = &zeroHash
+			return addrIndexer
+		}(),
+		mockDB:        db,
+		mockTxIndexer: txIndexer,
+		result: []string{
+			tx0TestTx.hex,
+			tx1TestTx.hex,
+		},
+	}, {
 		name:    "handleSearchRawTransactions: ok verbose with addr filter",
 		handler: handleSearchRawTransactions,
 		cmd: &types.SearchRawTransactionsCmd{
@@ -5870,7 +6084,81 @@ func TestHandleSearchRawTransactions(t *testing.T) {
 		}(),
 		wantErr: true,
 		errCode: dcrjson.ErrRPCInternal.Code,
-	}})
+	}, {
+		name:    "handleSearchRawTransactions: index is not synced",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(1),
+		},
+		mockAddrIndexer: func() *testAddrIndexer {
+			bestHeight := int64(block432100.Header.Height)
+			addrIndexer := defaultMockAddrIndexer()
+			addrIndexer.tipHeight = bestHeight - 6
+			return addrIndexer
+		}(),
+		mockDB:        db,
+		mockTxIndexer: txIndexer,
+		wantErr:       true,
+		errCode:       dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleSearchRawTransactions: unable to fetch index tip",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(1),
+		},
+		mockAddrIndexer: func() *testAddrIndexer {
+			addrIndexer := defaultMockAddrIndexer()
+			addrIndexer.tipErr = errors.New("unable to fetch index tip")
+			return addrIndexer
+		}(),
+		mockDB:        db,
+		mockTxIndexer: txIndexer,
+		wantErr:       true,
+		errCode:       dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleSearchRawTransactions: index is not synced after syncWait",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(1),
+		},
+		mockAddrIndexer: func() *testAddrIndexer {
+			addrIndexer := defaultMockAddrIndexer()
+			addrIndexer.tipHash = &zeroHash
+			addrIndexer.signalOnWait = false
+			return addrIndexer
+		}(),
+		mockDB:        db,
+		mockTxIndexer: txIndexer,
+		wantErr:       true,
+		errCode:       dcrjson.ErrRPCInternal.Code,
+	}, {
+		name:    "handleSearchRawTransactions: unable to fetch treasury agenda status",
+		handler: handleSearchRawTransactions,
+		cmd: &types.SearchRawTransactionsCmd{
+			Address:  address,
+			VinExtra: dcrjson.Int(1),
+			Verbose:  dcrjson.Int(1),
+		},
+		mockChain: func() *testRPCChain {
+			chain := defaultMockRPCChain()
+			chain.treasuryActive = false
+			chain.treasuryActiveErr =
+				errors.New("unable to fetch treasury agenda status")
+			return chain
+		}(),
+		mockAddrIndexer: addrIndexer,
+		mockDB:          db,
+		mockTxIndexer:   txIndexer,
+		wantErr:         true,
+		errCode:         dcrjson.ErrRPCInternal.Code,
+	},
+	})
 }
 
 func TestHandleSubmitBlock(t *testing.T) {
