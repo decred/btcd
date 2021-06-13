@@ -273,7 +273,7 @@ func teardownDB(db database.DB, dbPath string) {
 	os.RemoveAll(dbPath)
 }
 
-// TestTxIndexAsync ensures the tx index behaves as expected recieving
+// TestTxIndexAsync ensures the tx index behaves as expected receiving
 // async notifications.
 func TestTxIndexAsync(t *testing.T) {
 	db, path := setupDB(t, "test_txindex")

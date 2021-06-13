@@ -2164,7 +2164,7 @@ func (q *ChainQueryerAdapter) PrevScripts(dbTx database.Tx, block *dcrutil.Block
 	return prevScripts, nil
 }
 
-// ChainParams returns the network paramters of the chain.
+// ChainParams returns the network parameters of the chain.
 //
 // This is part of the indexers.ChainQueryer interface.
 func (q *ChainQueryerAdapter) ChainParams() *chaincfg.Params {

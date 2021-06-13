@@ -61,7 +61,7 @@ type ChainQueryer interface {
 	// in the main chain.
 	MainChainHasBlock(*chainhash.Hash) bool
 
-	// ChainParams returns the network paramters of the chain.
+	// ChainParams returns the network parameters of the chain.
 	ChainParams() *chaincfg.Params
 
 	// Best returns the height and hash of the current best block.
