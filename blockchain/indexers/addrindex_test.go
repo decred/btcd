@@ -7,9 +7,15 @@ package indexers
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"testing"
+	"time"
 
+	"github.com/decred/dcrd/blockchain/v4/chaingen"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/database/v2"
+	"github.com/decred/dcrd/txscript/v4"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -272,5 +278,429 @@ nextTest:
 				continue nextTest
 			}
 		}
+	}
+}
+
+// TestAddrIndexAsync ensures the address index behaves
+// receiving updates asynchronously.
+func TestAddrIndexAsync(t *testing.T) {
+	db, path := setupDB(t, "test_addrindex")
+	defer teardownDB(db, path)
+
+	// Create the test chain.
+	chain, err := newTestChain()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := chaingen.MakeGenerator(chaincfg.SimNetParams())
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+
+	// Add three blocks to the chain.
+	addBlock(t, chain, &g, "bk1")
+	addBlock(t, chain, &g, "bk2")
+	bk3 := addBlock(t, chain, &g, "bk3")
+
+	// Initialize the tx index and address index. The tx index is required
+	// because the address index depends on it.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	subber := NewIndexSubscriber(ctx)
+	go subber.Run(ctx)
+
+	txIdx, err := NewTxIndex(subber, db, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	addrIdx, err := NewAddrIndex(subber, db, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = subber.CatchUp(ctx, db, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure the indexes got synced to bk3 on initialization.
+	txIdxTipHeight, txIdxTipHash, err := addrIdx.Tip()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if txIdxTipHeight != bk3.Height() {
+		t.Fatalf("expected tip height to be %d, got %d", bk3.Height(), txIdxTipHeight)
+	}
+
+	if *txIdxTipHash != *bk3.Hash() {
+		t.Fatalf("expected tip hash to be %s, got %s", bk3.Hash().String(),
+			txIdxTipHash.String())
+	}
+
+	addrIdxTipHeight, addrIdxTipHash, err := addrIdx.Tip()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if addrIdxTipHeight != bk3.Height() {
+		t.Fatalf("expected tip height to be %d, got %d", bk3.Height(), addrIdxTipHeight)
+	}
+
+	if *addrIdxTipHash != *bk3.Hash() {
+		t.Fatalf("expected tip hash to be %s, got %s", bk3.Hash().String(),
+			addrIdxTipHash.String())
+	}
+
+	// Ensure the address index remains in sync with the main chain when new
+	// blocks are connected.
+	bk4 := addBlock(t, chain, &g, "bk4")
+	ntfn := &IndexNtfn{
+		NtfnType:          ConnectNtfn,
+		Block:             bk4,
+		Parent:            bk3,
+		PrevScripts:       nil,
+		IsTreasuryEnabled: false,
+	}
+	notifyAndWait(t, subber, ntfn)
+
+	bk5 := addBlock(t, chain, &g, "bk5")
+	ntfn = &IndexNtfn{
+		NtfnType:          ConnectNtfn,
+		Block:             bk5,
+		Parent:            bk4,
+		PrevScripts:       nil,
+		IsTreasuryEnabled: false,
+	}
+	notifyAndWait(t, subber, ntfn)
+
+	// Ensure the indexes got synced to bk5.
+	txIdxTipHeight, txIdxTipHash, err = addrIdx.Tip()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if txIdxTipHeight != bk5.Height() {
+		t.Fatalf("expected tip height to be %d, got %d", bk5.Height(),
+			txIdxTipHeight)
+	}
+
+	if *txIdxTipHash != *bk5.Hash() {
+		t.Fatalf("expected tip hash to be %s, got %s", bk5.Hash().String(),
+			txIdxTipHash.String())
+	}
+
+	addrIdxTipHeight, addrIdxTipHash, err = addrIdx.Tip()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if addrIdxTipHeight != bk5.Height() {
+		t.Fatalf("expected tip height to be %d, got %d", bk5.Height(),
+			addrIdxTipHeight)
+	}
+
+	if *addrIdxTipHash != *bk5.Hash() {
+		t.Fatalf("expected tip hash to be %s, got %s", bk5.Hash().String(),
+			addrIdxTipHash.String())
+	}
+
+	// Ensure the spend consumer's tip was updated to bk5.
+	addrIdx.consumer.mtx.Lock()
+	tipHash := addrIdx.consumer.tipHash
+	addrIdx.consumer.mtx.Unlock()
+
+	if !tipHash.IsEqual(bk5.Hash()) {
+		t.Fatalf("expected spend consumer tip hash to be %s, got %s",
+			bk5.Hash().String(), tipHash.String())
+	}
+
+	// Fetch the first address paid to by bk5's coinbase.
+	out := bk5.MsgBlock().Transactions[0].TxOut[0]
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(out.Version,
+		out.PkScript, addrIdx.chainParams, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure the address index has the first address paid to by bk5's
+	// coinbase indexed.
+	err = db.View(func(dbTx database.Tx) error {
+		entry, _, err := addrIdx.EntriesForAddress(dbTx, addrs[0], 0, 1, false)
+		if err != nil {
+			return err
+		}
+		if entry == nil {
+			return fmt.Errorf("no index entry found for address %s",
+				addrs[0].String())
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a reorg by setting bk4 as the main chain tip. bk5 is now
+	// an orphan block.
+	g.SetTip("bk4")
+	err = chain.RemoveBlock(bk5)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add bk5a to the main chain.
+	bk5a := addBlock(t, chain, &g, "bk5a")
+
+	// Resubscribe the indexes.
+	err = addrIdx.sub.stop()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = txIdx.sub.stop()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	txIdx, err = NewTxIndex(subber, db, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	addrIdx, err = NewAddrIndex(subber, db, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = subber.CatchUp(ctx, db, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure the indexes recovered to bk4 and synced back to the main chain tip
+	// bk5a.
+	txIdxTipHeight, txIdxTipHash, err = txIdx.Tip()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if txIdxTipHeight != bk5a.Height() {
+		t.Fatalf("expected tip height to be %d, got %d",
+			bk5a.Height(), txIdxTipHeight)
+	}
+
+	if *txIdxTipHash != *bk5a.Hash() {
+		t.Fatalf("expected tip hash to be %s, got %s",
+			bk5a.Hash().String(), txIdxTipHash.String())
+	}
+
+	addrIdxTipHeight, addrIdxTipHash, err = addrIdx.Tip()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if addrIdxTipHeight != bk5a.Height() {
+		t.Fatalf("expected tip height to be %d, got %d",
+			bk5a.Height(), addrIdxTipHeight)
+	}
+
+	if *addrIdxTipHash != *bk5a.Hash() {
+		t.Fatalf("expected tip hash to be %s, got %s",
+			bk5a.Hash().String(), addrIdxTipHash.String())
+	}
+
+	// Ensure the spend consumer's tip was updated to bk5a.
+	addrIdx.consumer.mtx.Lock()
+	tipHash = addrIdx.consumer.tipHash
+	addrIdx.consumer.mtx.Unlock()
+
+	if !tipHash.IsEqual(bk5a.Hash()) {
+		t.Fatalf("expected spend consumer tip hash to be %s, got %s",
+			bk5a.Hash().String(), tipHash.String())
+	}
+
+	// Ensure the addreses associated with bk5's coinbase transaction
+	// is no longer indexed by the address manager.
+	// Ensure the address index no longder has the first address paid to by
+	// bk5's coinbase indexed.
+	err = db.View(func(dbTx database.Tx) error {
+		entry, _, err := addrIdx.EntriesForAddress(dbTx, addrs[0], 0, 1, false)
+		if err != nil {
+			return err
+		}
+		if entry != nil {
+			return fmt.Errorf("expected no index entry found for address %s",
+				addrs[0].String())
+		}
+
+		return nil
+	})
+	if err == nil {
+		t.Fatalf("expected no index entry found for address %s",
+			addrs[0].String())
+	}
+
+	// Ensure the indexes remain in sync when blocks are disconnected.
+	err = chain.RemoveBlock(bk5a)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g.SetTip("bk4")
+
+	ntfn = &IndexNtfn{
+		NtfnType:          DisconnectNtfn,
+		Block:             bk5a,
+		Parent:            bk4,
+		PrevScripts:       nil,
+		IsTreasuryEnabled: false,
+	}
+	notifyAndWait(t, subber, ntfn)
+
+	err = chain.RemoveBlock(bk4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g.SetTip("bk3")
+
+	ntfn = &IndexNtfn{
+		NtfnType:          DisconnectNtfn,
+		Block:             bk4,
+		Parent:            bk3,
+		PrevScripts:       nil,
+		IsTreasuryEnabled: false,
+	}
+	notifyAndWait(t, subber, ntfn)
+
+	// Ensure the index tips are now bk3 after the disconnections.
+	txIdxTipHeight, txIdxTipHash, err = addrIdx.Tip()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if txIdxTipHeight != bk3.Height() {
+		t.Fatalf("expected tip height to be %d, got %d",
+			bk3.Height(), txIdxTipHeight)
+	}
+
+	if *txIdxTipHash != *bk3.Hash() {
+		t.Fatalf("expected tip hash to be %s, got %s",
+			bk3.Hash().String(), txIdxTipHash.String())
+	}
+
+	addrIdxTipHeight, addrIdxTipHash, err = addrIdx.Tip()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if addrIdxTipHeight != bk3.Height() {
+		t.Fatalf("expected tip height to be %d, got %d", bk3.Height(), addrIdxTipHeight)
+	}
+
+	if *addrIdxTipHash != *bk3.Hash() {
+		t.Fatalf("expected tip hash to be %s, got %s", bk3.Hash().String(),
+			addrIdxTipHash.String())
+	}
+
+	// Drop the address index and resubscribe.
+	err = addrIdx.sub.stop()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = addrIdx.DropIndex(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	addrIdx, err = NewAddrIndex(subber, db, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = subber.CatchUp(ctx, db, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure the address index got synced to bk3 on initialization.
+	addrIdxTipHeight, addrIdxTipHash, err = addrIdx.Tip()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if addrIdxTipHeight != bk3.Height() {
+		t.Fatalf("expected tip height to be %d, got %d", bk3.Height(), addrIdxTipHeight)
+	}
+
+	if *addrIdxTipHash != *bk3.Hash() {
+		t.Fatalf("expected tip hash to be %s, got %s", bk3.Hash().String(),
+			addrIdxTipHash.String())
+	}
+
+	// Add bk4a to the main chain.
+	bk4a := addBlock(t, chain, &g, "bk4a")
+
+	go func() {
+		// Stall the index notification for bk4a.
+		time.Sleep(time.Millisecond * 150)
+		notif := &IndexNtfn{
+			NtfnType:    ConnectNtfn,
+			Block:       bk4a,
+			Parent:      bk3,
+			PrevScripts: nil,
+			Done:        make(chan bool),
+		}
+		subber.Notify(notif)
+		select {
+		case <-notif.Done:
+			// Nothing to do.
+		case <-time.After(time.Second):
+			panic("timeout waiting for done signal for notification")
+		}
+	}()
+
+	// Wait for the index to sync with the main chain.
+	select {
+	case <-addrIdx.WaitForSync():
+		// Nothing to do.
+	case <-time.After(time.Second):
+		panic("timeout waiting for index to synchronize")
+	}
+
+	// Add bk6 and bk7 to the main chain.
+	bk6 := addBlock(t, chain, &g, "bk6")
+	bk7 := addBlock(t, chain, &g, "bk7")
+
+	// Ensure sending an unexpected index notification (bk7) does not
+	// update the index.
+	ntfn = &IndexNtfn{
+		NtfnType:    ConnectNtfn,
+		Block:       bk7,
+		Parent:      bk6,
+		PrevScripts: nil,
+	}
+	notifyAndWait(t, subber, ntfn)
+
+	// Ensure the address index remains at tip bk4a after receiving unexpected
+	// index notification for bk7.
+	addrIdxTipHeight, addrIdxTipHash, err = addrIdx.Tip()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if addrIdxTipHeight != bk4a.Height() {
+		t.Fatalf("expected tip height to be %d, got %d",
+			bk4a.Height(), addrIdxTipHeight)
+	}
+
+	if *addrIdxTipHash != *bk4a.Hash() {
+		t.Fatalf("expected tip hash to be %s, got %s",
+			bk4a.Hash().String(), addrIdxTipHash.String())
 	}
 }
