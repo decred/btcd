@@ -232,16 +232,16 @@ type UtxoBackend interface {
 	Upgrade(ctx context.Context, b *BlockChain) error
 }
 
-// LevelDbUtxoBackend implements the UtxoBackend interface using an underlying
+// levelDbUtxoBackend implements the UtxoBackend interface using an underlying
 // leveldb database instance.
-type LevelDbUtxoBackend struct {
+type levelDbUtxoBackend struct {
 	// db is the database that contains the UTXO set.  It is set when the instance
 	// is created and is not changed afterward.
 	db *leveldb.DB
 }
 
-// Ensure LevelDbUtxoBackend implements the UtxoBackend interface.
-var _ UtxoBackend = (*LevelDbUtxoBackend)(nil)
+// Ensure levelDbUtxoBackend implements the UtxoBackend interface.
+var _ UtxoBackend = (*levelDbUtxoBackend)(nil)
 
 // removeDB removes the database at the provided path.  The fi parameter MUST
 // agree with the provided path.
@@ -307,10 +307,10 @@ func LoadUtxoDB(params *chaincfg.Params, dataDir string) (*leveldb.DB, error) {
 	return db, nil
 }
 
-// NewLevelDbUtxoBackend returns a new LevelDbUtxoBackend instance using the
+// NewLevelDbUtxoBackend returns a new levelDbUtxoBackend instance using the
 // provided database.
-func NewLevelDbUtxoBackend(db *leveldb.DB) *LevelDbUtxoBackend {
-	return &LevelDbUtxoBackend{
+func NewLevelDbUtxoBackend(db *leveldb.DB) UtxoBackend {
+	return &levelDbUtxoBackend{
 		db: db,
 	}
 }
@@ -321,7 +321,7 @@ func NewLevelDbUtxoBackend(db *leveldb.DB) *LevelDbUtxoBackend {
 //
 // It is safe to modify the contents of the returned slice, and it is safe to
 // modify the contents of the argument after Get returns.
-func (l *LevelDbUtxoBackend) Get(key []byte) ([]byte, error) {
+func (l *levelDbUtxoBackend) Get(key []byte) ([]byte, error) {
 	serialized, err := l.db.Get(key, nil)
 	if err != nil {
 		if errors.Is(err, leveldb.ErrNotFound) {
@@ -337,7 +337,7 @@ func (l *LevelDbUtxoBackend) Get(key []byte) ([]byte, error) {
 // the transaction to be rolled back and are returned from this function.
 // Otherwise, the transaction is committed when the user-supplied function
 // returns a nil error.
-func (l *LevelDbUtxoBackend) Update(fn func(tx UtxoBackendTx) error) error {
+func (l *levelDbUtxoBackend) Update(fn func(tx UtxoBackendTx) error) error {
 	// Start a leveldb transaction.
 	//
 	// Note: A leveldb.Transaction is used rather than a leveldb.Batch because
@@ -374,7 +374,7 @@ func (l *LevelDbUtxoBackend) Update(fn func(tx UtxoBackendTx) error) error {
 // modified unless noted otherwise.
 //
 // The iterator must be released after use, by calling Release method.
-func (l *LevelDbUtxoBackend) NewIterator(prefix []byte) UtxoBackendIterator {
+func (l *levelDbUtxoBackend) NewIterator(prefix []byte) UtxoBackendIterator {
 	var slice *util.Range
 	if prefix != nil {
 		slice = util.BytesPrefix(prefix)
@@ -386,7 +386,7 @@ func (l *LevelDbUtxoBackend) NewIterator(prefix []byte) UtxoBackendIterator {
 //
 // When there is no entry for the provided output, nil will be returned for both
 // the entry and the error.
-func (l *LevelDbUtxoBackend) dbFetchUtxoEntry(outpoint wire.OutPoint) (*UtxoEntry, error) {
+func (l *levelDbUtxoBackend) dbFetchUtxoEntry(outpoint wire.OutPoint) (*UtxoEntry, error) {
 	// Fetch the unspent transaction output information for the passed transaction
 	// output.  Return now when there is no entry.
 	key := outpointKey(outpoint)
@@ -426,7 +426,7 @@ func (l *LevelDbUtxoBackend) dbFetchUtxoEntry(outpoint wire.OutPoint) (*UtxoEntr
 //
 // When there is no entry for the provided output, nil will be returned for both
 // the entry and the error.
-func (l *LevelDbUtxoBackend) FetchEntry(outpoint wire.OutPoint) (*UtxoEntry, error) {
+func (l *levelDbUtxoBackend) FetchEntry(outpoint wire.OutPoint) (*UtxoEntry, error) {
 	// Fetch the entry from the database.
 	//
 	// NOTE: Missing entries are not considered an error here and instead
@@ -437,7 +437,7 @@ func (l *LevelDbUtxoBackend) FetchEntry(outpoint wire.OutPoint) (*UtxoEntry, err
 }
 
 // FetchState returns the current state of the UTXO set.
-func (l *LevelDbUtxoBackend) FetchState() (*UtxoSetState, error) {
+func (l *levelDbUtxoBackend) FetchState() (*UtxoSetState, error) {
 	// Fetch the utxo set state from the database.
 	serialized, err := l.Get(utxoSetStateKey)
 	if err != nil {
@@ -457,7 +457,7 @@ func (l *LevelDbUtxoBackend) FetchState() (*UtxoSetState, error) {
 
 // dbFetchUtxoStats fetches statistics on the current unspent transaction output
 // set.
-func (l *LevelDbUtxoBackend) dbFetchUtxoStats() (*UtxoStats, error) {
+func (l *levelDbUtxoBackend) dbFetchUtxoStats() (*UtxoStats, error) {
 	var stats UtxoStats
 	transactions := make(map[chainhash.Hash]struct{})
 	leaves := make([]chainhash.Hash, 0)
@@ -515,13 +515,13 @@ func (l *LevelDbUtxoBackend) dbFetchUtxoStats() (*UtxoStats, error) {
 }
 
 // FetchStats returns statistics on the current UTXO set.
-func (l *LevelDbUtxoBackend) FetchStats() (*UtxoStats, error) {
+func (l *levelDbUtxoBackend) FetchStats() (*UtxoStats, error) {
 	return l.dbFetchUtxoStats()
 }
 
 // dbPutUtxoBackendInfo uses an existing UTXO backend transaction to store the
 // backend information.
-func (l *LevelDbUtxoBackend) dbPutUtxoBackendInfo(tx UtxoBackendTx,
+func (l *levelDbUtxoBackend) dbPutUtxoBackendInfo(tx UtxoBackendTx,
 	info *UtxoBackendInfo) error {
 
 	// uint32Bytes is a helper function to convert a uint32 to a byte slice
@@ -565,7 +565,7 @@ func (l *LevelDbUtxoBackend) dbPutUtxoBackendInfo(tx UtxoBackendTx,
 
 // dbFetchUtxoBackendInfo fetches the backend versioning and creation
 // information.
-func (l *LevelDbUtxoBackend) dbFetchUtxoBackendInfo() (*UtxoBackendInfo, error) {
+func (l *levelDbUtxoBackend) dbFetchUtxoBackendInfo() (*UtxoBackendInfo, error) {
 	// Load the database version.
 	prefix := utxoPrefixDbInfo
 	versionBytes, err := l.Get(utxoDbInfoVersionKey)
@@ -636,7 +636,7 @@ func (l *LevelDbUtxoBackend) dbFetchUtxoBackendInfo() (*UtxoBackendInfo, error) 
 
 // createUtxoBackendInfo initializes the UTXO backend info.  It must only be
 // called on an uninitialized backend.
-func (l *LevelDbUtxoBackend) createUtxoBackendInfo(blockDBVersion uint32) error {
+func (l *levelDbUtxoBackend) createUtxoBackendInfo(blockDBVersion uint32) error {
 	// Initialize the UTXO set version.  If the block database version is before
 	// version 9, then initialize the UTXO set version based on the block
 	// database version since that is what tracked the UTXO set version at that
@@ -660,12 +660,12 @@ func (l *LevelDbUtxoBackend) createUtxoBackendInfo(blockDBVersion uint32) error 
 }
 
 // FetchInfo returns versioning and creation information for the backend.
-func (l *LevelDbUtxoBackend) FetchInfo() (*UtxoBackendInfo, error) {
+func (l *levelDbUtxoBackend) FetchInfo() (*UtxoBackendInfo, error) {
 	return l.dbFetchUtxoBackendInfo()
 }
 
 // InitInfo loads (or creates if necessary) the UTXO backend info.
-func (l *LevelDbUtxoBackend) InitInfo(blockDBVersion uint32) error {
+func (l *levelDbUtxoBackend) InitInfo(blockDBVersion uint32) error {
 	// Fetch the backend versioning information.
 	dbInfo, err := l.dbFetchUtxoBackendInfo()
 	if err != nil {
@@ -697,7 +697,7 @@ func (l *LevelDbUtxoBackend) InitInfo(blockDBVersion uint32) error {
 }
 
 // PutInfo sets the versioning and creation information for the backend.
-func (l *LevelDbUtxoBackend) PutInfo(info *UtxoBackendInfo) error {
+func (l *levelDbUtxoBackend) PutInfo(info *UtxoBackendInfo) error {
 	return l.Update(func(tx UtxoBackendTx) error {
 		return l.dbPutUtxoBackendInfo(tx, info)
 	})
@@ -708,7 +708,7 @@ func (l *LevelDbUtxoBackend) PutInfo(info *UtxoBackendInfo) error {
 // particular, the entry is only written to the database if it is marked as
 // modified, and if the entry is marked as spent it is removed from the
 // database.
-func (l *LevelDbUtxoBackend) dbPutUtxoEntry(tx UtxoBackendTx,
+func (l *levelDbUtxoBackend) dbPutUtxoEntry(tx UtxoBackendTx,
 	outpoint wire.OutPoint, entry *UtxoEntry) error {
 
 	// No need to update the database if the entry was not modified.
@@ -744,7 +744,7 @@ func (l *LevelDbUtxoBackend) dbPutUtxoEntry(tx UtxoBackendTx,
 
 // PutUtxos atomically updates the UTXO set with the entries from the provided
 // map along with the current state.
-func (l *LevelDbUtxoBackend) PutUtxos(utxos map[wire.OutPoint]*UtxoEntry,
+func (l *levelDbUtxoBackend) PutUtxos(utxos map[wire.OutPoint]*UtxoEntry,
 	state *UtxoSetState) error {
 
 	// Update the database with the provided entries and UTXO set state.
@@ -768,7 +768,7 @@ func (l *LevelDbUtxoBackend) PutUtxos(utxos map[wire.OutPoint]*UtxoEntry,
 
 // Upgrade upgrades the UTXO backend by applying all possible upgrades
 // iteratively as needed.
-func (l *LevelDbUtxoBackend) Upgrade(ctx context.Context, b *BlockChain) error {
+func (l *levelDbUtxoBackend) Upgrade(ctx context.Context, b *BlockChain) error {
 	// Upgrade the UTXO database as needed.
 	return upgradeUtxoDb(ctx, b.db, l)
 }

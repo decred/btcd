@@ -13,7 +13,7 @@ import (
 )
 
 // createTestUtxoBackend creates a test backend with the utxo set bucket.
-func createTestUtxoBackend(t *testing.T) *LevelDbUtxoBackend {
+func createTestUtxoBackend(t *testing.T) UtxoBackend {
 	t.Helper()
 
 	db, teardown, err := createTestUtxoDatabase(t.Name())
