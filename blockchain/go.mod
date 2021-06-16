@@ -16,6 +16,7 @@ require (
 	github.com/decred/dcrd/txscript/v4 v4.0.0-20210415215133-96b98390a9a9
 	github.com/decred/dcrd/wire v1.4.0
 	github.com/decred/slog v1.1.0
+	github.com/syndtr/goleveldb v1.0.1-0.20200815110645-5c35d600f0ca
 )
 
 replace (
