@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/decred/dcrd/blockchain/stake/v4"
+	"github.com/decred/dcrd/wire"
 )
 
 // TestUtxoSerialization ensures serializing and deserializing unspent
@@ -404,6 +405,114 @@ func TestUtxoSetStateDeserializeErrors(t *testing.T) {
 		}
 		if entry != nil {
 			t.Errorf("%q: returned utxo set state is not nil", test.name)
+			continue
+		}
+	}
+}
+
+// TestOutpointKey ensures that encoding and decoding outpoint keys works as
+// expected.
+func TestOutpointKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		outpoint   *wire.OutPoint
+		serialized []byte
+	}{{
+		name: "outpoint in regular tree at index 2",
+		outpoint: &wire.OutPoint{
+			Hash: *mustParseHash("72914cae2d4bc75f7777373b7c085c4b92d59f3e059fc7fd3" +
+				"9def71c9fe188b5"),
+			Index: 2,
+			Tree:  wire.TxTreeRegular,
+		},
+		// [<prefix 0303><hash b588...9172><tree 00><index 02>]
+		serialized: hexToBytes("0303b588e19f1cf7de39fdc79f053e9fd5924b5c087c3b377" +
+			"7775fc74b2dae4c91720002"),
+	}, {
+		name: "outpoint in stake tree at index 0",
+		outpoint: &wire.OutPoint{
+			Hash: *mustParseHash("d3bce77da2747baa85fb7ca4f6f8e123f31cd15ac691b2f82" +
+				"543780158587d3a"),
+			Index: 0,
+			Tree:  wire.TxTreeStake,
+		},
+		// [<prefix 0303><hash 3a7d...bcd3><tree 01><index 00>]
+		serialized: hexToBytes("03033a7d585801784325f8b291c65ad11cf323e1f8f6a47cf" +
+			"b85aa7b74a27de7bcd30100"),
+	}}
+
+	for _, test := range tests {
+		// Ensure that the outpoint serializes to the expected outpoint key.
+		gotBytes := outpointKey(*test.outpoint)
+		if !bytes.Equal(*gotBytes, test.serialized) {
+			t.Errorf("%q: mismatched bytes - got %x, want %x", test.name, *gotBytes,
+				test.serialized)
+			continue
+		}
+
+		// Ensure that the serialized bytes are decoded back to the expected
+		// outpoint.
+		var gotOutpoint wire.OutPoint
+		err := decodeOutpointKey(test.serialized, &gotOutpoint)
+		if err != nil {
+			t.Errorf("%q: unexpected error: %v", test.name, err)
+			continue
+		}
+		if !reflect.DeepEqual(gotOutpoint, *test.outpoint) {
+			t.Errorf("%q: mismatched outpoint:\nwant: %+v\n got: %+v\n", test.name,
+				*test.outpoint, gotOutpoint)
+			continue
+		}
+	}
+}
+
+// TestDecodeOutpointKeyErrors performs negative tests against decoding outpoint
+// keys to ensure error paths work as expected.
+func TestDecodeOutpointKeyErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		serialized []byte
+		errType    error
+	}{{
+		// [EOF]
+		name:       "nothing serialized",
+		serialized: hexToBytes(""),
+		errType:    errDeserialize(""),
+	}, {
+		// [<prefix 0303>]
+		name:       "no data after prefix",
+		serialized: hexToBytes("0303"),
+		errType:    errDeserialize(""),
+	}, {
+		// [<prefix 0303><truncated hash b588>]
+		name:       "truncated hash",
+		serialized: hexToBytes("0303b588"),
+		errType:    errDeserialize(""),
+	}, {
+		// [<prefix 0303><hash b588...9172>]
+		name: "no data after hash",
+		serialized: hexToBytes("0303b588e19f1cf7de39fdc79f053e9fd5924b5c087c3b377" +
+			"7775fc74b2dae4c9172"),
+		errType: errDeserialize(""),
+	}, {
+		// [<prefix 0303><hash b588...9172><tree 00>]
+		name: "no data after tree",
+		serialized: hexToBytes("0303b588e19f1cf7de39fdc79f053e9fd5924b5c087c3b377" +
+			"7775fc74b2dae4c917200"),
+		errType: errDeserialize(""),
+	}}
+
+	for _, test := range tests {
+		// Ensure the expected error type is returned.
+		var gotOutpoint wire.OutPoint
+		err := decodeOutpointKey(test.serialized, &gotOutpoint)
+		if !errors.As(err, &test.errType) {
+			t.Errorf("%q: expected error type does not match - got %T, want %T",
+				test.name, err, test.errType)
 			continue
 		}
 	}
