@@ -728,6 +728,58 @@ func (b *BlockChain) maxTreasuryExpenditureDCP0006(preTVINode *blockNode) (int64
 	return allowedToSpend, nil
 }
 
+// maxTreasuryExpenditureDCP0007 returns the maximum amount of funds that can
+// be spent from the treasury at the block after the provided node.
+//
+// This is code that was activated as part of the 'fixtreasuryexp' consensus
+// upgrade as defined in DCP0007.
+//
+// See notes on maxTreasuryExpenditure().
+func (b *BlockChain) maxTreasuryExpenditureDCP0007(preTVINode *blockNode) (int64, error) {
+	// The expenditure policy check is roughly speaking:
+	//
+	//     "The sum of tspends inside an expenditure window cannot exceed
+	//     the total amount of income received by the treasury in the same
+	//     window in addition to an X% increase."
+	//
+	// Currently this function is pretty naive. It simply iterates through
+	// prior blocks one at a time. This is very expensive and may need to
+	// be rethought into a proper index.
+
+	policyWindow := b.chainParams.TreasuryVoteInterval *
+		b.chainParams.TreasuryVoteIntervalMultiplier *
+		b.chainParams.TreasuryExpenditureWindow
+
+	// Each policy window starts at a TVI block and ends at the block
+	// immediately prior to another TVI (inclusive of preTVINode).
+	//
+	// First: sum up tspends, tadds and tbases inside the most recent
+	// policyWindow.
+	spentRecent, addedRecent, _, err := b.sumPastTreasuryChanges(preTVINode, policyWindow)
+	if err != nil {
+		return 0, err
+	}
+
+	// Treasury can spend up to 150% the amount received in the previous
+	// window.
+	addedPlusAllowance := addedRecent + addedRecent/2
+
+	// The maximum expenditure allowed for the next block is the difference
+	// between the maximum possible and what has already been spent in the most
+	// recent policy window. This is capped at zero on the lower end to account
+	// for cases where the policy _already_ spent more than the allowed.
+	var allowedToSpend int64
+	if addedPlusAllowance > spentRecent {
+		allowedToSpend = addedPlusAllowance - spentRecent
+	}
+
+	trsyLog.Tracef("  maxTSpendExpenditureDCP0007: spent %d, "+
+		"added %d, allowedToSpend %d", spentRecent,
+		addedRecent, allowedToSpend)
+
+	return allowedToSpend, nil
+}
+
 // maxTreasuryExpenditure returns the maximum amount of funds that can be spent
 // from the treasury at the block after the provided node.  A set of TSPENDs
 // added to a TVI block that is a child to the passed node may spend up to the
