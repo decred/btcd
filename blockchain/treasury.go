@@ -787,6 +787,13 @@ func (b *BlockChain) maxTreasuryExpenditureDCP0007(preTVINode *blockNode) (int64
 //
 // The passed node MUST correspond to a node immediately prior to a TVI block.
 func (b *BlockChain) maxTreasuryExpenditure(preTVINode *blockNode) (int64, error) {
+	isRevertPolicyActive, err := b.isRevertTreasuryPolicyActive(preTVINode)
+	if err != nil {
+		return 0, err
+	}
+	if isRevertPolicyActive {
+		return b.maxTreasuryExpenditureDCP0007(preTVINode)
+	}
 	return b.maxTreasuryExpenditureDCP0006(preTVINode)
 }
 
