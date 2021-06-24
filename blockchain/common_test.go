@@ -494,6 +494,54 @@ func findDeploymentAllYesChoices(params *chaincfg.Params, voteIDs []string) (uin
 		"provided vote IDs")
 }
 
+// mergeAgendas moves all the specified agendas into the same deployment,
+// suitable for being voted at the same time.
+//
+// The agendas will be moved to the deployment that contains the first agenda
+// in the voteIDs slice.
+//
+// Returns the resulting deployment version.
+func mergeAgendas(params *chaincfg.Params, voteIDs []string) (uint32, error) {
+	if len(voteIDs) < 2 {
+		return 0, fmt.Errorf("at least 2 agenda IDs must be specified")
+	}
+
+	// The first agenda defines the destination deployment, where the
+	// others will be moved to.
+	targetDeployVer, _, err := findDeployment(params, voteIDs[0])
+	if err != nil {
+		return 0, err
+	}
+	voteIDs = voteIDs[1:]
+	targetDeploy := params.Deployments[targetDeployVer]
+
+nextvote:
+	for _, wantID := range voteIDs {
+		for version, deployments := range params.Deployments {
+			for i := 0; i < len(deployments); {
+				deployment := deployments[i]
+
+				if deployment.Vote.Id != wantID {
+					i++
+					continue
+				}
+
+				// Found where the agenda is. Move to target.
+				targetDeploy = append(targetDeploy, deployment)
+				params.Deployments[targetDeployVer] = targetDeploy
+				deployments[i] = deployments[len(deployments)-1]
+				deployments = deployments[:len(deployments)-1]
+				params.Deployments[version] = deployments
+				continue nextvote
+			}
+		}
+
+		return 0, fmt.Errorf("unable to find vote id %s", wantID)
+	}
+
+	return targetDeployVer, nil
+}
+
 // removeDeployment modifies the passed parameters to remove all deployments for
 // the provided vote ID.  An error is returned when not found.
 func removeDeployment(params *chaincfg.Params, voteID string) error {
