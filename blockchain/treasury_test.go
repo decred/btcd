@@ -503,7 +503,7 @@ func TestTSpendVoteCount(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -919,7 +919,7 @@ func TestTSpendEmptyTreasury(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -1096,7 +1096,7 @@ func TestTSpendExpendituresPolicy(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -1595,7 +1595,7 @@ func TestExpendituresReorg(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -1833,7 +1833,7 @@ func TestSpendableTreasuryTxs(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -2131,7 +2131,7 @@ func TestTSpendDupVote(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -2278,7 +2278,7 @@ func TestTSpendTooManyTSpend(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -2392,7 +2392,7 @@ func TestTSpendWindow(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -2515,7 +2515,7 @@ func TestTSpendSignature(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -2733,7 +2733,7 @@ func TestTSpendSignatureInvalid(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -2881,7 +2881,7 @@ func TestTSpendExists(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -3146,7 +3146,7 @@ func TestTreasuryBalance(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -3445,7 +3445,7 @@ func TestTAddCorners(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -3700,7 +3700,7 @@ func TestTreasuryBaseCorners(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -3838,7 +3838,7 @@ func TestTSpendCorners(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -4178,7 +4178,7 @@ func TestTreasuryInRegularTree(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
@@ -4742,7 +4742,7 @@ func TestTSpendTooManyTAdds(t *testing.T) {
 	// ---------------------------------------------------------------------
 
 	g.AdvanceToStakeValidationHeight()
-	g.AdvanceFromSVHToActiveAgenda(tVoteID)
+	g.AdvanceFromSVHToActiveAgendas(tVoteID)
 
 	// Ensure treasury agenda is active.
 	tipHash := &g.chain.BestSnapshot().Hash
