@@ -260,7 +260,7 @@ func (s *IndexSubscriber) CatchUp(ctx context.Context, db database.DB, queryer C
 		// Ensure the next tip hash is on the main chain.
 		if !queryer.MainChainHasBlock(hash) {
 			return fmt.Errorf("the next block being synced to (%s) "+
-				"at height %d is "+"not on the main chain.", hash, height)
+				"at height %d is "+"not on the main chain", hash, height)
 		}
 
 		var parent *dcrutil.Block
@@ -284,7 +284,7 @@ func (s *IndexSubscriber) CatchUp(ctx context.Context, db database.DB, queryer C
 
 		// Construct and send the index notification.
 		var prevScripts PrevScripter
-		err = db.Update(func(dbTx database.Tx) error {
+		err = db.View(func(dbTx database.Tx) error {
 			if interruptRequested(ctx) {
 				return errInterruptRequested
 			}
@@ -311,11 +311,16 @@ func (s *IndexSubscriber) CatchUp(ctx context.Context, db database.DB, queryer C
 			Parent:            parent,
 			PrevScripts:       prevScripts,
 			IsTreasuryEnabled: isTreasuryEnabled,
-			Done:              make(chan bool),
 		}
 
-		s.Notify(ntfn)
-		<-ntfn.Done
+		// Relay the index update to subscribed indexes.
+		for _, sub := range s.subscriptions {
+			err := updateIndex(ctx, sub.idx, ntfn)
+			if err != nil {
+				s.cancel()
+				return err
+			}
+		}
 
 		cachedParent = child
 
