@@ -331,7 +331,7 @@ func TestTreasury(t *testing.T) {
 
 	// Create a very large tspend that will be approved but shouldn't be
 	// mined due to spending more than allowed by the expenditure policy.
-	largeAmount := dcrutil.Amount(net.TreasuryExpenditureBootstrap * 100)
+	largeAmount := dcrutil.Amount(30000e8)
 	largePayout := []tspendPayout{{address: p2pkhAddr, amount: largeAmount}}
 	tspendLarge := createTSpend(piKey, largePayout, tspendFee, expiry)
 

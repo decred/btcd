@@ -602,16 +602,17 @@ func VerifyTSpendSignature(msgTx *wire.MsgTx, signature, pubKey []byte) error {
 	return verifyTSpendSignature(msgTx, signature, pubKey)
 }
 
-// sumPastTreasuryExpenditure sums up all tspends found within the range
-// (node-nbBlocks..node). Note that this sum is _inclusive_ of the passed block
-// and is performed in descending order. Generally, the passed node will be a
-// node immediately before a TVI block.
+// sumPastTreasuryChanges sums up the amounts spent from and added to the
+// treasury (respectively) found within the range (node-nbBlocks..node).  Note
+// that this sum is _inclusive_ of the passed block and is performed in
+// descending order.  Generally, the passed node will be a node immediately
+// before a TVI block.
 //
 // It also returns the node immediately before the last checked node (that is,
 // the node before node-nbBlocks).
-func (b *BlockChain) sumPastTreasuryExpenditure(preTVINode *blockNode, nbBlocks uint64) (int64, *blockNode, error) {
+func (b *BlockChain) sumPastTreasuryChanges(preTVINode *blockNode, nbBlocks uint64) (int64, int64, *blockNode, error) {
 	node := preTVINode
-	var total int64
+	var spent, added int64
 	var derr errDbTreasury
 	for i := uint64(0); i < nbBlocks && node != nil; i++ {
 		ts, err := b.dbFetchTreasurySingle(node.hash)
@@ -621,33 +622,35 @@ func (b *BlockChain) sumPastTreasuryExpenditure(preTVINode *blockNode, nbBlocks 
 			node = nil
 			continue
 		} else if err != nil {
-			return 0, nil, err
+			return 0, 0, nil, err
 		}
 
 		// Range over values.
 		for _, v := range ts.values {
-			isTreasuryDebit := v.typ == treasuryValueTSpend ||
-				v.typ == treasuryValueFee
-			if isTreasuryDebit {
+			switch v.typ {
+			case treasuryValueTSpend, treasuryValueFee:
 				// treasuryValues record debits as negative
 				// amounts, so invert it here.
-				total += -v.amount
+				spent += -v.amount
+			default:
+				added += v.amount
 			}
 		}
 
 		node = node.parent
 	}
 
-	return total, node, nil
+	return spent, added, node, nil
 }
 
-// maxTreasuryExpenditure returns the maximum amount of funds that can be spent
-// from the treasury at the block after the provided node.  A set of TSPENDs
-// added to a TVI block that is a child to the passed node may spend up to the
-// returned amount.
+// maxTreasuryExpenditureDCP0006 returns the maximum amount of funds that can
+// be spent from the treasury at the block after the provided node.
 //
-// The passed node MUST correspond to a node immediately prior to a TVI block.
-func (b *BlockChain) maxTreasuryExpenditure(preTVINode *blockNode) (int64, error) {
+// This is code that was activated as part of the 'treasury' consensus upgrade
+// as defined in DCP0006.
+//
+// See notes on maxTreasuryExpenditure().
+func (b *BlockChain) maxTreasuryExpenditureDCP0006(preTVINode *blockNode) (int64, error) {
 	// The expenditure policy check is roughly speaking:
 	//
 	//     "The sum of tspends inside an expenditure window cannot exceed
@@ -672,7 +675,7 @@ func (b *BlockChain) maxTreasuryExpenditure(preTVINode *blockNode) (int64, error
 	// immediately prior to another TVI (inclusive of preTVINode).
 	//
 	// First: sum up tspends inside the most recent policyWindow.
-	spentRecentWindow, node, err := b.sumPastTreasuryExpenditure(preTVINode, policyWindow)
+	spentRecentWindow, _, node, err := b.sumPastTreasuryChanges(preTVINode, policyWindow)
 	if err != nil {
 		return 0, err
 	}
@@ -684,7 +687,7 @@ func (b *BlockChain) maxTreasuryExpenditure(preTVINode *blockNode) (int64, error
 	var nbNonEmptyWindows int64
 	for i := uint64(0); i < b.chainParams.TreasuryExpenditurePolicy && node != nil; i++ {
 		var spent int64
-		spent, node, err = b.sumPastTreasuryExpenditure(node, policyWindow)
+		spent, _, node, err = b.sumPastTreasuryChanges(node, policyWindow)
 		if err != nil {
 			return 0, err
 		}
@@ -723,6 +726,75 @@ func (b *BlockChain) maxTreasuryExpenditure(preTVINode *blockNode) (int64, error
 		spentPriorWindows, nbNonEmptyWindows, allowedToSpend)
 
 	return allowedToSpend, nil
+}
+
+// maxTreasuryExpenditureDCP0007 returns the maximum amount of funds that can
+// be spent from the treasury at the block after the provided node.
+//
+// This is code that was activated as part of the 'fixtreasuryexp' consensus
+// upgrade as defined in DCP0007.
+//
+// See notes on maxTreasuryExpenditure().
+func (b *BlockChain) maxTreasuryExpenditureDCP0007(preTVINode *blockNode) (int64, error) {
+	// The expenditure policy check is roughly speaking:
+	//
+	//     "The sum of tspends inside an expenditure window cannot exceed
+	//     the total amount of income received by the treasury in the same
+	//     window in addition to an X% increase."
+	//
+	// Currently this function is pretty naive. It simply iterates through
+	// prior blocks one at a time. This is very expensive and may need to
+	// be rethought into a proper index.
+
+	policyWindow := b.chainParams.TreasuryVoteInterval *
+		b.chainParams.TreasuryVoteIntervalMultiplier *
+		b.chainParams.TreasuryExpenditureWindow
+
+	// Each policy window starts at a TVI block and ends at the block
+	// immediately prior to another TVI (inclusive of preTVINode).
+	//
+	// First: sum up tspends, tadds and tbases inside the most recent
+	// policyWindow.
+	spentRecent, addedRecent, _, err := b.sumPastTreasuryChanges(preTVINode, policyWindow)
+	if err != nil {
+		return 0, err
+	}
+
+	// Treasury can spend up to 150% the amount received in the previous
+	// window.
+	addedPlusAllowance := addedRecent + addedRecent/2
+
+	// The maximum expenditure allowed for the next block is the difference
+	// between the maximum possible and what has already been spent in the most
+	// recent policy window. This is capped at zero on the lower end to account
+	// for cases where the policy _already_ spent more than the allowed.
+	var allowedToSpend int64
+	if addedPlusAllowance > spentRecent {
+		allowedToSpend = addedPlusAllowance - spentRecent
+	}
+
+	trsyLog.Tracef("  maxTSpendExpenditureDCP0007: spent %d, "+
+		"added %d, allowedToSpend %d", spentRecent,
+		addedRecent, allowedToSpend)
+
+	return allowedToSpend, nil
+}
+
+// maxTreasuryExpenditure returns the maximum amount of funds that can be spent
+// from the treasury at the block after the provided node.  A set of TSPENDs
+// added to a TVI block that is a child to the passed node may spend up to the
+// returned amount.
+//
+// The passed node MUST correspond to a node immediately prior to a TVI block.
+func (b *BlockChain) maxTreasuryExpenditure(preTVINode *blockNode) (int64, error) {
+	isRevertPolicyActive, err := b.isRevertTreasuryPolicyActive(preTVINode)
+	if err != nil {
+		return 0, err
+	}
+	if isRevertPolicyActive {
+		return b.maxTreasuryExpenditureDCP0007(preTVINode)
+	}
+	return b.maxTreasuryExpenditureDCP0006(preTVINode)
 }
 
 // MaxTreasuryExpenditure is the maximum amount of funds that can be spent from

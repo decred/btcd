@@ -451,6 +451,97 @@ func findDeploymentChoice(deployment *chaincfg.ConsensusDeployment, choiceID str
 	return nil, fmt.Errorf("unable to find vote choice for id %q", choiceID)
 }
 
+// findDeploymentAllYesChoices returns the deployment version and the OR'ed sum
+// of the 'yes' choices for all the passed agendas.
+//
+// Note that all agendas must be in the same deployment version or this
+// function errors.
+func findDeploymentAllYesChoices(params *chaincfg.Params, voteIDs []string) (uint32, uint16, error) {
+	var yesBits uint16
+	var deploymentVer uint32
+	var foundIDs int
+	for version, deployments := range params.Deployments {
+		for _, deployment := range deployments {
+			for _, wantID := range voteIDs {
+				if deployment.Vote.Id == wantID {
+					yesChoice, err := findDeploymentChoice(&deployment, "yes")
+					if err != nil {
+						return 0, 0, err
+					}
+					deploymentVer = version
+					foundIDs++
+					yesBits |= yesChoice.Bits
+				}
+			}
+		}
+
+		if foundIDs == 0 {
+			continue
+		}
+
+		// Agendas can only be voted simultaneously if they belong to
+		// the same deployment version, so return an error if we found
+		// some, but not all vote IDs in a specific version.
+		if foundIDs != len(voteIDs) {
+			return 0, 0, fmt.Errorf("not all voteIDs were found " +
+				"in the same deployment version")
+		}
+
+		return deploymentVer, yesBits, nil
+	}
+
+	return 0, 0, fmt.Errorf("unable to find deployment for any of the " +
+		"provided vote IDs")
+}
+
+// mergeAgendas moves all the specified agendas into the same deployment,
+// suitable for being voted at the same time.
+//
+// The agendas will be moved to the deployment that contains the first agenda
+// in the voteIDs slice.
+//
+// Returns the resulting deployment version.
+func mergeAgendas(params *chaincfg.Params, voteIDs []string) (uint32, error) {
+	if len(voteIDs) < 2 {
+		return 0, fmt.Errorf("at least 2 agenda IDs must be specified")
+	}
+
+	// The first agenda defines the destination deployment, where the
+	// others will be moved to.
+	targetDeployVer, _, err := findDeployment(params, voteIDs[0])
+	if err != nil {
+		return 0, err
+	}
+	voteIDs = voteIDs[1:]
+	targetDeploy := params.Deployments[targetDeployVer]
+
+nextvote:
+	for _, wantID := range voteIDs {
+		for version, deployments := range params.Deployments {
+			for i := 0; i < len(deployments); {
+				deployment := deployments[i]
+
+				if deployment.Vote.Id != wantID {
+					i++
+					continue
+				}
+
+				// Found where the agenda is. Move to target.
+				targetDeploy = append(targetDeploy, deployment)
+				params.Deployments[targetDeployVer] = targetDeploy
+				deployments[i] = deployments[len(deployments)-1]
+				deployments = deployments[:len(deployments)-1]
+				params.Deployments[version] = deployments
+				continue nextvote
+			}
+		}
+
+		return 0, fmt.Errorf("unable to find vote id %s", wantID)
+	}
+
+	return targetDeployVer, nil
+}
+
 // removeDeployment modifies the passed parameters to remove all deployments for
 // the provided vote ID.  An error is returned when not found.
 func removeDeployment(params *chaincfg.Params, voteID string) error {
@@ -1250,27 +1341,27 @@ func (g *chaingenHarness) AdvanceToStakeValidationHeight() {
 	g.generateToStakeValidationHeight(accept)
 }
 
-// AdvanceFromSVHToActiveAgenda generates and accepts enough blocks with the
-// appropriate vote bits set to reach one block prior to the specified agenda
+// AdvanceFromSVHToActiveAgendas generates and accepts enough blocks with the
+// appropriate vote bits set to reach one block prior to the specified agendas
 // becoming active.
 //
 // The function will fail with a fatal test error if it is called when the
-// harness is not at stake validation height.
+// harness is not at stake validation height or if the agendas are not all from
+// the same deployment.
 //
 // WARNING: This function currently assumes the chain parameters were created
 // via the quickVoteActivationParams.  It should be updated in the future to
 // work with arbitrary params.
-func (g *chaingenHarness) AdvanceFromSVHToActiveAgenda(voteID string) {
+func (g *chaingenHarness) AdvanceFromSVHToActiveAgendas(voteIDs ...string) {
 	g.t.Helper()
 
-	// Find the correct deployment for the provided ID along with the yes
-	// vote choice within it.
-	params := g.Params()
-	deploymentVer, deployment, err := findDeployment(params, voteID)
-	if err != nil {
-		g.t.Fatal(err)
+	if len(voteIDs) < 1 {
+		g.t.Fatal("no vote IDs specified")
 	}
-	yesChoice, err := findDeploymentChoice(deployment, "yes")
+
+	// Sum all yes bits from all the agendas.
+	params := g.Params()
+	deploymentVer, yesBits, err := findDeploymentAllYesChoices(params, voteIDs)
 	if err != nil {
 		g.t.Fatal(err)
 	}
@@ -1279,6 +1370,11 @@ func (g *chaingenHarness) AdvanceFromSVHToActiveAgenda(voteID string) {
 	stakeValidationHeight := params.StakeValidationHeight
 	stakeVerInterval := params.StakeVersionInterval
 	ruleChangeInterval := int64(params.RuleChangeActivationInterval)
+	testThresholdState := func(state ThresholdState) {
+		for _, voteID := range voteIDs {
+			g.TestThresholdState(voteID, state)
+		}
+	}
 
 	// Only allow this to be called on a harness at SVH.
 	if g.Tip().Header.Height != uint32(stakeValidationHeight) {
@@ -1311,7 +1407,7 @@ func (g *chaingenHarness) AdvanceFromSVHToActiveAgenda(voteID string) {
 		g.SaveTipCoinbaseOuts()
 		g.AcceptTipBlock()
 	}
-	g.TestThresholdState(voteID, ThresholdStarted)
+	testThresholdState(ThresholdStarted)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to reach the next rule change interval with
@@ -1332,14 +1428,14 @@ func (g *chaingenHarness) AdvanceFromSVHToActiveAgenda(voteID string) {
 		g.NextBlock(blockName, nil, outs[1:],
 			chaingen.ReplaceBlockVersion(int32(deploymentVer)),
 			chaingen.ReplaceStakeVersion(deploymentVer),
-			chaingen.ReplaceVotes(vbPrevBlockValid|yesChoice.Bits, deploymentVer))
+			chaingen.ReplaceVotes(vbPrevBlockValid|yesBits, deploymentVer))
 		g.SaveTipCoinbaseOuts()
 		g.AcceptTipBlock()
 	}
 	g.AssertTipHeight(uint32(stakeValidationHeight + ruleChangeInterval*2 - 1))
 	g.AssertBlockVersion(int32(deploymentVer))
 	g.AssertStakeVersion(deploymentVer)
-	g.TestThresholdState(voteID, ThresholdLockedIn)
+	testThresholdState(ThresholdLockedIn)
 
 	// ---------------------------------------------------------------------
 	// Generate enough blocks to reach the next rule change interval with
@@ -1367,5 +1463,5 @@ func (g *chaingenHarness) AdvanceFromSVHToActiveAgenda(voteID string) {
 	g.AssertTipHeight(uint32(stakeValidationHeight + ruleChangeInterval*3 - 1))
 	g.AssertBlockVersion(int32(deploymentVer))
 	g.AssertStakeVersion(deploymentVer)
-	g.TestThresholdState(voteID, ThresholdActive)
+	testThresholdState(ThresholdActive)
 }
