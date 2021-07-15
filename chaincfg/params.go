@@ -145,6 +145,11 @@ const (
 	// VoteIDTreasury is the vote ID for the agenda that enables the
 	// decentralized treasury opcodes defined by DCP0006.
 	VoteIDTreasury = "treasury"
+
+	// VoteIDRevertTreasuryPolicy is the vote ID for the agenda that
+	// reverts the maxium expenditure policy of the treasury account as
+	// defined by DCP0007.
+	VoteIDRevertTreasuryPolicy = "reverttreasurypolicy"
 )
 
 // ConsensusDeployment defines details related to a specific consensus rule
