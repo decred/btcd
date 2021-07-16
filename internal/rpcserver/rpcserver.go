@@ -104,6 +104,10 @@ const (
 	// merkleRootPairSize is the size in bytes of the merkle root + stake root
 	// of a block.
 	merkleRootPairSize = 64
+
+	// syncWait is the maximum time in seconds to wait for an index
+	// to sync with the main chain.
+	syncWait = time.Second * 3
 )
 
 var (
@@ -1530,7 +1534,34 @@ func handleExistsAddress(_ context.Context, s *Server, cmd interface{}) (interfa
 			err)
 	}
 
-	exists, err := s.cfg.ExistsAddresser.ExistsAddress(addr)
+	// Ensure the exists address index is synced.
+	existsAddrIndex := s.cfg.ExistsAddresser
+	tHeight, tHash, err := existsAddrIndex.Tip()
+	if err != nil {
+		return nil, rpcInternalError(err.Error(), "Tip")
+	}
+
+	chain := s.cfg.Chain
+
+	// Return an out-of-sync error if index is lagging a
+	// maximum reorg depth (6) blocks or more from the chain tip.
+	if chain.BestSnapshot().Height > (tHeight + 5) {
+		msg := fmt.Sprintf("%s: index not synced", existsAddrIndex.Name())
+		return nil, rpcInternalError(msg, "Sync")
+	}
+
+sync:
+	for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+		select {
+		case <-time.After(syncWait):
+			msg := fmt.Sprintf("%s: index not synced", existsAddrIndex.Name())
+			return nil, rpcInternalError(msg, "Sync")
+		case <-existsAddrIndex.WaitForSync():
+			break sync
+		}
+	}
+
+	exists, err := existsAddrIndex.ExistsAddress(addr)
 	if err != nil {
 		return nil, rpcInvalidError("Could not query address: %v", err)
 	}
@@ -1560,7 +1591,34 @@ func handleExistsAddresses(_ context.Context, s *Server, cmd interface{}) (inter
 		addresses[i] = addr
 	}
 
-	exists, err := s.cfg.ExistsAddresser.ExistsAddresses(addresses)
+	// Ensure the exists address index is synced.
+	existsAddrIndex := s.cfg.ExistsAddresser
+	tHeight, tHash, err := existsAddrIndex.Tip()
+	if err != nil {
+		return nil, rpcInternalError(err.Error(), "Tip")
+	}
+
+	chain := s.cfg.Chain
+
+	// Return an out-of-sync error if index is lagging a
+	// maximum reorg depth (6) blocks or more from the chain tip.
+	if chain.BestSnapshot().Height > (tHeight + 5) {
+		msg := fmt.Sprintf("%s: index not synced", existsAddrIndex.Name())
+		return nil, rpcInternalError(msg, "Sync")
+	}
+
+sync:
+	for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+		select {
+		case <-time.After(syncWait):
+			msg := fmt.Sprintf("%s: index not synced", existsAddrIndex.Name())
+			return nil, rpcInternalError(msg, "Sync")
+		case <-existsAddrIndex.WaitForSync():
+			break sync
+		}
+	}
+
+	exists, err := existsAddrIndex.ExistsAddresses(addresses)
 	if err != nil {
 		return nil, rpcInvalidError("Could not query address: %v", err)
 	}
@@ -2774,16 +2832,43 @@ func handleGetRawTransaction(_ context.Context, s *Server, cmd interface{}) (int
 	var blkHeight int64
 	var blkIndex uint32
 	chain := s.cfg.Chain
+	txIndex := s.cfg.TxIndexer
 	tx, err := s.cfg.TxMempooler.FetchTransaction(txHash)
 	if err != nil {
-		if s.cfg.TxIndexer == nil {
+		if txIndex == nil {
 			return nil, rpcInternalError("The transaction index "+
 				"must be enabled to query the blockchain "+
 				"(specify --txindex)", "Configuration")
 		}
 
+		// Ensure the tx index is synced.
+		tHeight, tHash, err := txIndex.Tip()
+		if err != nil {
+			return nil, rpcInternalError(err.Error(), "Tip")
+		}
+
+		chain := s.cfg.Chain
+
+		// Return an out-of-sync error if index is lagging a
+		// maximum reorg depth (6) blocks or more from the chain tip.
+		if chain.BestSnapshot().Height > (tHeight + 5) {
+			msg := fmt.Sprintf("%s: index not synced", txIndex.Name())
+			return nil, rpcInternalError(msg, "Sync")
+		}
+
+	sync:
+		for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+			select {
+			case <-time.After(syncWait):
+				msg := fmt.Sprintf("%s: index not synced", txIndex.Name())
+				return nil, rpcInternalError(msg, "Sync")
+			case <-txIndex.WaitForSync():
+				break sync
+			}
+		}
+
 		// Look up the location of the transaction.
-		idxEntry, err := s.cfg.TxIndexer.Entry(txHash)
+		idxEntry, err := txIndex.Entry(txHash)
 		if err != nil {
 			context := "Failed to retrieve transaction location"
 			return nil, rpcInternalError(err.Error(), context)
@@ -4104,8 +4189,35 @@ func fetchInputTxos(s *Server, tx *wire.MsgTx, isTreasuryEnabled bool) (map[wire
 			continue
 		}
 
+		// Ensure the tx index is synced.
+		txIndex := s.cfg.TxIndexer
+		tHeight, tHash, err := txIndex.Tip()
+		if err != nil {
+			return nil, rpcInternalError(err.Error(), "Tip")
+		}
+
+		chain := s.cfg.Chain
+
+		// Return an out-of-sync error if index is lagging a
+		// maximum reorg depth (6) blocks or more from the chain tip.
+		if chain.BestSnapshot().Height > (tHeight + 5) {
+			msg := fmt.Sprintf("%s: index not synced", txIndex.Name())
+			return nil, rpcInternalError(msg, "Sync")
+		}
+
+	sync:
+		for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+			select {
+			case <-time.After(syncWait):
+				msg := fmt.Sprintf("%s: index not synced", txIndex.Name())
+				return nil, rpcInternalError(msg, "Sync")
+			case <-txIndex.WaitForSync():
+				break sync
+			}
+		}
+
 		// Look up the location of the transaction.
-		idxEntry, err := s.cfg.TxIndexer.Entry(&origin.Hash)
+		idxEntry, err := txIndex.Entry(&origin.Hash)
 		if err != nil {
 			context := "Failed to retrieve transaction location"
 			return nil, rpcInternalError(err.Error(), context)
@@ -4440,8 +4552,35 @@ func handleSearchRawTransactions(_ context.Context, s *Server, cmd interface{}) 
 	// Fetch transactions from the database in the desired order if more
 	// are needed.
 	if len(addressTxns) < numRequested {
+		// Ensure the adddr index is synced.
+		addrIndex := s.cfg.AddrIndexer
+		tHeight, tHash, err := addrIndex.Tip()
+		if err != nil {
+			return nil, rpcInternalError(err.Error(), "Tip")
+		}
+
+		chain := s.cfg.Chain
+
+		// Return an out-of-sync error if index is lagging a
+		// maximum reorg depth (6) blocks or more from the chain tip.
+		if chain.BestSnapshot().Height > (tHeight + 5) {
+			msg := fmt.Sprintf("%s: index not synced", addrIndex.Name())
+			return nil, rpcInternalError(msg, "Sync")
+		}
+
+	sync:
+		for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+			select {
+			case <-time.After(syncWait):
+				msg := fmt.Sprintf("%s: index not synced", addrIndex.Name())
+				return nil, rpcInternalError(msg, "Sync")
+			case <-addrIndex.WaitForSync():
+				break sync
+			}
+		}
+
 		err = s.cfg.DB.View(func(dbTx database.Tx) error {
-			idxEntries, dbSkipped, err := s.cfg.AddrIndexer.EntriesForAddress(
+			idxEntries, dbSkipped, err := addrIndex.EntriesForAddress(
 				dbTx, addr, uint32(numToSkip)-numSkipped,
 				uint32(numRequested-len(addressTxns)), reverse)
 			if err != nil {

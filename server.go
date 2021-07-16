@@ -500,6 +500,7 @@ type server struct {
 	// if the associated index is not enabled.  These fields are set during
 	// initial creation of the server and never changed afterwards, so they
 	// do not need to be protected for concurrent access.
+	indexSubscriber *indexers.IndexSubscriber
 	txIndex         *indexers.TxIndex
 	addrIndex       *indexers.AddrIndex
 	existsAddrIndex *indexers.ExistsAddrIndex
@@ -3039,6 +3040,21 @@ func (s *server) Run(ctx context.Context) {
 		}
 	}
 
+	// Start the chain's spend pruner handler which processes spend journal
+	// prune signals.
+	s.wg.Add(1)
+	go func(ctx context.Context, s *server) {
+		s.chain.SpendPrunerHandler(ctx)
+		s.wg.Done()
+	}(ctx, s)
+
+	// Start the chain's index subscriber.
+	s.wg.Add(1)
+	go func(ctx context.Context, s *server) {
+		s.indexSubscriber.Run(ctx)
+		s.wg.Done()
+	}(ctx, s)
+
 	// Wait until the server is signalled to shutdown.
 	<-ctx.Done()
 	atomic.AddInt32(&s.shutdown, 1)
@@ -3335,38 +3351,7 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB,
 		lotteryDataBroadcast: make(map[chainhash.Hash]struct{}),
 		recentlyConfirmedTxns: apbf.NewFilter(maxRecentlyConfirmedTxns,
 			recentlyConfirmedTxnsFPRate),
-	}
-
-	// Create the transaction and address indexes if needed.
-	//
-	// CAUTION: the txindex needs to be first in the indexes array because
-	// the addrindex uses data from the txindex during catchup.  If the
-	// addrindex is run first, it may not have the transactions from the
-	// current block indexed.
-	var indexes []indexers.Indexer
-	if cfg.TxIndex || cfg.AddrIndex {
-		// Enable transaction index if address index is enabled since it
-		// requires it.
-		if !cfg.TxIndex {
-			indxLog.Infof("Transaction index enabled because it " +
-				"is required by the address index")
-			cfg.TxIndex = true
-		} else {
-			indxLog.Info("Transaction index is enabled")
-		}
-
-		s.txIndex = indexers.NewTxIndex(db)
-		indexes = append(indexes, s.txIndex)
-	}
-	if cfg.AddrIndex {
-		indxLog.Info("Address index is enabled")
-		s.addrIndex = indexers.NewAddrIndex(db, chainParams)
-		indexes = append(indexes, s.addrIndex)
-	}
-	if !cfg.NoExistsAddrIndex {
-		indxLog.Info("Exists address index is enabled")
-		s.existsAddrIndex = indexers.NewExistsAddrIndex(db, chainParams)
-		indexes = append(indexes, s.existsAddrIndex)
+		indexSubscriber: indexers.NewIndexSubscriber(ctx),
 	}
 
 	feC := fees.EstimatorConfig{
@@ -3389,12 +3374,6 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB,
 	}
 	s.feeEstimator = fe
 
-	// Create an index manager if any of the optional indexes are enabled.
-	var indexManager indexers.IndexManager
-	if len(indexes) > 0 {
-		indexManager = indexers.NewManager(db, indexes, chainParams)
-	}
-
 	// Only configure checkpoints when enabled.
 	var checkpoints []chaincfg.Checkpoint
 	if !cfg.DisableCheckpoints {
@@ -3410,17 +3389,59 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB,
 	})
 	s.chain, err = blockchain.New(ctx,
 		&blockchain.Config{
-			DB:            s.db,
-			UtxoBackend:   utxoBackend,
-			ChainParams:   s.chainParams,
-			Checkpoints:   checkpoints,
-			TimeSource:    s.timeSource,
-			Notifications: s.handleBlockchainNotification,
-			SigCache:      s.sigCache,
-			SubsidyCache:  s.subsidyCache,
-			IndexManager:  indexManager,
-			UtxoCache:     utxoCache,
+			DB:              s.db,
+			UtxoBackend:     utxoBackend,
+			ChainParams:     s.chainParams,
+			Checkpoints:     checkpoints,
+			TimeSource:      s.timeSource,
+			Notifications:   s.handleBlockchainNotification,
+			SigCache:        s.sigCache,
+			SubsidyCache:    s.subsidyCache,
+			IndexSubscriber: s.indexSubscriber,
+			UtxoCache:       utxoCache,
 		})
+	if err != nil {
+		return nil, err
+	}
+
+	queryer := &blockchain.ChainQueryerAdapter{BlockChain: s.chain}
+	err = indexers.AddIndexSpendConsumers(s.db, queryer)
+	if err != nil {
+		return nil, err
+	}
+
+	if cfg.TxIndex || cfg.AddrIndex {
+		// Enable transaction index if address index is enabled since it
+		// requires it.
+		if !cfg.TxIndex {
+			indxLog.Infof("Transaction index enabled because it " +
+				"is required by the address index")
+			cfg.TxIndex = true
+		} else {
+			indxLog.Info("Transaction index is enabled")
+		}
+
+		s.txIndex, err = indexers.NewTxIndex(s.indexSubscriber, db, queryer)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if cfg.AddrIndex {
+		indxLog.Info("Address index is enabled")
+		s.addrIndex, err = indexers.NewAddrIndex(s.indexSubscriber, db, queryer)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !cfg.NoExistsAddrIndex {
+		indxLog.Info("Exists address index is enabled")
+		s.existsAddrIndex, err = indexers.NewExistsAddrIndex(s.indexSubscriber,
+			db, queryer)
+		if err != nil {
+			return nil, err
+		}
+	}
+	err = s.indexSubscriber.CatchUp(ctx, s.db, queryer)
 	if err != nil {
 		return nil, err
 	}
