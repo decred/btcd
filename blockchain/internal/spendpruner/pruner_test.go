@@ -22,19 +22,11 @@ type testSpendConsumer struct {
 	tip              *chainhash.Hash
 	needSpendData    bool
 	needSpendDataErr error
-	mtx              sync.Mutex
 }
 
 // ID returns the identifier of the consumer.
 func (t *testSpendConsumer) ID() string {
 	return t.id
-}
-
-// UpdateTip sets the tip of the consumer to the provided block hash.
-func (t *testSpendConsumer) UpdateTip(hash *chainhash.Hash) {
-	t.mtx.Lock()
-	t.tip = hash
-	t.mtx.Unlock()
 }
 
 // NeedSpendData checks whether the associated spend journal entry
@@ -167,13 +159,13 @@ func TestSpendPruner(t *testing.T) {
 	// Ensure there is no existing dependency for consumerB on hashA.
 	exists := pruner.dependencyExistsInternal(hashA, consumerB.ID())
 	if exists {
-		t.Fatalf("unexpected dependency found for consumerB on hashA")
+		t.Fatal("unexpected dependency found for consumerB on hashA")
 	}
 
 	// Ensure there is an existing dependency for consumerA on hashA.
 	exists = pruner.dependencyExistsInternal(hashA, consumerA.ID())
 	if !exists {
-		t.Fatalf("expected dependency found for consumerA on hashA")
+		t.Fatal("expected dependency found for consumerA on hashA")
 	}
 
 	// Ensure consumerC and consumerA now have dependencies on hashA.
@@ -199,17 +191,17 @@ func TestSpendPruner(t *testing.T) {
 
 	exists = pruner.DependencyExists(hashA)
 	if !exists {
-		t.Fatalf("expected existing dependencies for hashA")
+		t.Fatal("expected existing dependencies for hashA")
 	}
 
 	exists = pruner.dependencyExistsInternal(hashA, consumerC.ID())
 	if !exists {
-		t.Fatalf("expected dependency found for consumerC on hashA")
+		t.Fatal("expected dependency found for consumerC on hashA")
 	}
 
 	exists = pruner.dependencyExistsInternal(hashA, consumerA.ID())
 	if !exists {
-		t.Fatalf("expected dependency found for consumerA on hashA")
+		t.Fatal("expected dependency found for consumerA on hashA")
 	}
 
 	// Ensure there are now two dependent entries for hashA.
@@ -244,7 +236,7 @@ func TestSpendPruner(t *testing.T) {
 
 	ok = isRemovedSpendEntry(chain, hashA)
 	if ok {
-		t.Fatalf("unexpected hashA spend data pruned")
+		t.Fatal("unexpected hashA spend data pruned")
 	}
 
 	// Ensure the spend pruner does remove spend entries for
@@ -276,12 +268,12 @@ func TestSpendPruner(t *testing.T) {
 	// Ensure the pruner no longer has a dependent entry for HashA.
 	_, ok = pruner.dependents[*hashA]
 	if ok {
-		t.Fatalf("expected no dependent entry for hashA")
+		t.Fatal("expected no dependent entry for hashA")
 	}
 
 	ok = isRemovedSpendEntry(chain, hashX)
 	if !ok {
-		t.Fatalf("expected hashA spend data to be pruned")
+		t.Fatal("expected hashA spend data to be pruned")
 	}
 
 	// Update spend consumers to need spend data for upcoming tests.
@@ -291,7 +283,7 @@ func TestSpendPruner(t *testing.T) {
 	hashB := &chainhash.Hash{'b'}
 	err = pruner.addSpendConsumerDeps(hashB)
 	if err != nil {
-		t.Fatalf("unexpected error adding consumer dependencies "+
+		t.Fatal("unexpected error adding consumer dependencies "+
 			"for hashB: %v", err)
 	}
 

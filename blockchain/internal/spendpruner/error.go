@@ -20,6 +20,9 @@ const (
 
 	// ErrNeedSpendData indicates an error asserting a spend data dependency.
 	ErrNeedSpendData = ErrorKind("ErrNeedSpendData")
+
+	// ErrNeedSpendData indicates an error updating consumer spend dependencies.
+	ErrUpdateConsumerDeps = ErrorKind("ErrUpdateConsumerDeps")
 )
 
 // Error satisfies the error interface and prints human-readable errors.

@@ -5,6 +5,7 @@
 package spendpruner
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,26 +15,74 @@ import (
 	"github.com/decred/dcrd/wire"
 )
 
-// TestSerializeDeserializeConsumerDeps ensures consumer dependencies
-// serialize and deserialize as intended.
-func TestSerializeDeserializeConsumerDeps(t *testing.T) {
-	deps := []string{"alpha", "bravo", "charlie", "echo"}
+// TestSerializeConsumerDeps ensures consumer dependencies serialize as intended.
+func TestSerializeConsumerDeps(t *testing.T) {
+	tests := []struct {
+		name     string
+		deps     []string
+		expected []byte
+	}{{
+		name:     "no dependencies",
+		deps:     []string{},
+		expected: []byte{},
+	}, {
+		name:     "one dependency",
+		deps:     []string{"alpha"},
+		expected: []byte("alpha"),
+	}, {
+		name:     "odd number of dependencies",
+		deps:     []string{"alpha", "bravo", "charlie"},
+		expected: []byte("alpha,bravo,charlie"),
+	}, {
+		name:     "even numeber of dependencies",
+		deps:     []string{"alpha", "bravo", "charlie", "echo"},
+		expected: []byte("alpha,bravo,charlie,echo"),
+	}}
 
-	serializedBytes := serializeSpendConsumerDeps(deps)
-	deserializedDeps := deserializeSpendConsumerDeps(serializedBytes)
-
-	for _, deserializedDep := range deserializedDeps {
-		match := false
-		for _, dep := range deps {
-			if deserializedDep == dep {
-				match = true
-				break
-			}
+	for _, test := range tests {
+		serialized := serializeSpendConsumerDeps(test.deps)
+		if !bytes.Equal(serialized, test.expected) {
+			t.Errorf("%q: unexpected serialized mismatch, "+
+				"expected %q, got %q", test.name, test.expected, serialized)
+			continue
 		}
+	}
+}
 
-		if !match {
-			t.Fatalf("deserialized dependency %s, not found in "+
-				"original set", deserializedDep)
+// TestDeserializeConsumerDeps ensures consumer dependencies deserialize as
+// intended.
+func TestDeserializeConsumerDeps(t *testing.T) {
+	tests := []struct {
+		name       string
+		serialized []byte
+		expected   []string
+	}{{
+		name:       "no dependencies",
+		serialized: []byte{},
+		expected:   []string{},
+	}, {
+		name:       "one dependency",
+		serialized: []byte("alpha"),
+		expected:   []string{"alpha"},
+	}, {
+		name:       "odd number of dependencies",
+		serialized: []byte("alpha,bravo,charlie"),
+		expected:   []string{"alpha", "bravo", "charlie"},
+	}, {
+		name:       "even numeber of dependencies",
+		serialized: []byte("alpha,bravo,charlie,echo"),
+		expected:   []string{"alpha", "bravo", "charlie", "echo"},
+	}}
+
+	for _, test := range tests {
+		deserialized := deserializeSpendConsumerDeps(test.serialized)
+		for idx := range test.expected {
+			if deserialized[idx] != test.expected[idx] {
+				t.Errorf("%q: unexpected dependency mismatch at index %d, "+
+					"expected %q, got %q", test.name, idx,
+					test.expected[idx], deserialized[idx])
+				continue
+			}
 		}
 	}
 }

@@ -2107,8 +2107,11 @@ func (b *BlockChain) SpendPrunerHandler(ctx context.Context) {
 	b.spendPruner.HandleSignals(ctx)
 }
 
+// Ensure spendPurgerAdapter implements the spendpruner.SpendPurger interface.
+var _ spendpruner.SpendPurger = (*spendPurgerAdapter)(nil)
+
 // spendPurgerAdapter provides an adapter from a blockchain
-// instance to the spendPruner.SpendPurger interface.
+// instance to the spendpruner.SpendPurger interface.
 type spendPurgerAdapter struct {
 	*BlockChain
 }

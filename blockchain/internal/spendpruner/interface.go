@@ -10,6 +10,8 @@ import (
 
 // SpendConsumer describes the requirements for implementing a spend
 // journal consumer.
+//
+// All functions MUST be safe for concurrent access.
 type SpendConsumer interface {
 	// ID returns the identifier of the consumer.
 	ID() string
@@ -20,6 +22,8 @@ type SpendConsumer interface {
 }
 
 // SpendPurger describes blockchain functionality required by the spend pruner.
+//
+// All functions MUST be safe for concurrent access.
 type SpendPurger interface {
 	// RemoveSpendEntry purges the associated spend journal entry of the
 	// provided block hash.

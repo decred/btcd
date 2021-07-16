@@ -67,6 +67,20 @@ func (s *SpendJournalPruner) AddConsumer(consumer SpendConsumer) {
 	s.consumersMtx.Unlock()
 }
 
+// FetchConsumer returns the spend journal consumer associated with the
+// provided id.
+func (s *SpendJournalPruner) FetchConsumer(id string) (SpendConsumer, error) {
+	s.consumersMtx.RLock()
+	defer s.consumersMtx.RUnlock()
+	consumer, ok := s.consumers[id]
+	if !ok {
+		msg := fmt.Sprintf("no spend consumer found with id %s", id)
+		return nil, pruneError(ErrNoConsumer, msg)
+	}
+
+	return consumer, nil
+}
+
 // DependencyExists determines whether there are spend consumer dependencies
 // for the provided block hash.
 func (s *SpendJournalPruner) DependencyExists(blockHash *chainhash.Hash) bool {
@@ -153,8 +167,9 @@ func (s *SpendJournalPruner) addSpendConsumerDeps(blockHash *chainhash.Hash) err
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("unable to update persisted consumer "+
+		msg := fmt.Sprintf("unable to update persisted consumer "+
 			"dependencies for block hash %v: %v", blockHash, err)
+		return pruneError(ErrUpdateConsumerDeps, msg)
 	}
 
 	return nil
@@ -164,13 +179,13 @@ func (s *SpendJournalPruner) addSpendConsumerDeps(blockHash *chainhash.Hash) err
 // associated with the provided block hash from the spend pruner. The block
 // hash is removed as a key of the dependents map once all its dependency
 // entries are removed.
-func (s *SpendJournalPruner) RemoveSpendConsumerDependency(blockHash *chainhash.Hash, consumerID string) {
+func (s *SpendJournalPruner) RemoveSpendConsumerDependency(blockHash *chainhash.Hash, consumerID string) error {
 	s.dependentsMtx.Lock()
 	dependents, ok := s.dependents[*blockHash]
 	if !ok {
 		s.dependentsMtx.Unlock()
 		// No entry for block hash found, do nothing.
-		return
+		return nil
 	}
 
 	for idx := 0; idx < len(dependents); idx++ {
@@ -193,14 +208,17 @@ func (s *SpendJournalPruner) RemoveSpendConsumerDependency(blockHash *chainhash.
 		return dbUpdateSpendConsumerDeps(tx, *blockHash, dependents)
 	})
 	if err != nil {
-		log.Errorf("unable to update consumer dependencies "+
+		msg := fmt.Sprintf("unable to update consumer dependencies "+
 			"entry for block hash %v: %v", blockHash, err)
+		return pruneError(ErrUpdateConsumerDeps, msg)
 	}
+
+	return nil
 }
 
 // removeSpendConsumerDeps removes the key/value pair of spend consumer deps and
 // the provided block hash from the the prune set as well as the database.
-func (s *SpendJournalPruner) removeSpendConsumerDeps(blockHash *chainhash.Hash) {
+func (s *SpendJournalPruner) removeSpendConsumerDeps(blockHash *chainhash.Hash) error {
 	s.dependentsMtx.Lock()
 	delete(s.dependents, *blockHash)
 	s.dependentsMtx.Unlock()
@@ -211,9 +229,12 @@ func (s *SpendJournalPruner) removeSpendConsumerDeps(blockHash *chainhash.Hash) 
 		return dbUpdateSpendConsumerDeps(tx, *blockHash, nil)
 	})
 	if err != nil {
-		log.Errorf("unable to remove persisted consumer dependencies "+
+		msg := fmt.Sprintf("unable to remove persisted consumer dependencies "+
 			"entry for block hash %v: %v", blockHash, err)
+		return pruneError(ErrUpdateConsumerDeps, msg)
 	}
+
+	return nil
 }
 
 // loadSpendConsumerDeps loads persisted consumer spend dependencies from
@@ -258,7 +279,10 @@ func (s *SpendJournalPruner) HandleSignals(ctx context.Context) {
 
 			// Remove the key/value pair of persisted spend consumer deps and
 			// the provided connected block hash from the prune set.
-			s.removeSpendConsumerDeps(blockHash)
+			err := s.removeSpendConsumerDeps(blockHash)
+			if err != nil {
+				log.Error(err)
+			}
 		}
 	}
 }

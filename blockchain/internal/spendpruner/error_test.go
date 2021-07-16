@@ -19,6 +19,7 @@ func TestErrorKindStringer(t *testing.T) {
 		{ErrNoConsumer, "ErrNoConsumer"},
 		{ErrLoadSpendDeps, "ErrLoadSpendDeps"},
 		{ErrNeedSpendData, "ErrNeedSpendData"},
+		{ErrUpdateConsumerDeps, "ErrUpdateConsumerDeps"},
 	}
 
 	for i, test := range tests {
@@ -121,7 +122,7 @@ func TestPruneErrorKindIsAs(t *testing.T) {
 			continue
 		}
 
-		// Ensure the underlying error kind can be unwrapped is and is the
+		// Ensure the underlying error kind can be unwrapped and is the
 		// expected kind.
 		var kind ErrorKind
 		if !errors.As(test.err, &kind) {
