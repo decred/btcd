@@ -384,6 +384,51 @@ func batchedUpdate(ctx context.Context, db database.DB, doBatch batchFn) error {
 	return nil
 }
 
+// utxoBackendBatchFn represents the batch function used by the UTXO backend
+// batched update function.
+type utxoBackendBatchFn func(tx UtxoBackendTx) (bool, error)
+
+// utxoBackendBatchedUpdate calls the provided batch function repeatedly until
+// it either returns an error other than the special ones described in this
+// comment or its return indicates no more calls are necessary.
+//
+// In order to ensure the backend is updated with the results of the batch that
+// have already been successfully completed, it is allowed to return
+// errBatchFinished and errInterruptRequested.  In the case of the former, the
+// error will be ignored.  In the case of the latter, the backend will be
+// updated and the error will be returned accordingly.  The backend will NOT
+// be updated if any other errors are returned.
+func utxoBackendBatchedUpdate(ctx context.Context,
+	utxoBackend UtxoBackend, doBatch utxoBackendBatchFn) error {
+
+	var isFullyDone bool
+	for !isFullyDone {
+		err := utxoBackend.Update(func(tx UtxoBackendTx) error {
+			var err error
+			isFullyDone, err = doBatch(tx)
+			if errors.Is(err, errInterruptRequested) ||
+				errors.Is(err, errBatchFinished) {
+
+				// No error here so the database transaction is not cancelled
+				// and therefore outstanding work is written to disk.  The outer
+				// function will exit with an interrupted error below due to
+				// another interrupted check.
+				return nil
+			}
+			return err
+		})
+		if err != nil {
+			return err
+		}
+
+		if interruptRequested(ctx) {
+			return errInterruptRequested
+		}
+	}
+
+	return nil
+}
+
 // clearFailedBlockFlagsV2 unmarks all blocks in a version 2 block index
 // previously marked failed so they are eligible for validation again under new
 // consensus rules.  This ensures clients that did not update prior to new rules
@@ -3191,10 +3236,32 @@ func upgradeToVersion10(ctx context.Context, db database.DB, dbInfo *databaseInf
 
 // separateUtxoDatabase moves the UTXO set and state from the block database to
 // the UTXO database.
-func separateUtxoDatabase(ctx context.Context, db database.DB, utxoDb database.DB) error {
-	// Hardcoded bucket and key names so updates do not affect old upgrades.
-	v1UtxoSetStateKeyName := []byte("utxosetstate")
+func separateUtxoDatabase(ctx context.Context, db database.DB,
+	utxoBackend UtxoBackend) error {
+
+	// Key names, versions, and prefixes are hardcoded below so that updates do
+	// not affect old upgrades.
+
+	// UTXO key sets and versions.
+	const utxoKeySetDbInfoV1 = 1
+	const utxoKeySetUtxoStateV1 = 2
+	const utxoKeySetUtxoSetV3 = 3
+	const utxoKeySetDbInfoVersion = 1
+	const utxoKeySetUtxoStateVersion = 1
+	const utxoKeySetUtxoSetVersion = 3
+
+	// Legacy buckets.
 	v3UtxoSetBucketName := []byte("utxosetv3")
+
+	// UTXO state keys.
+	utxoPrefixUtxoStateV1 := []byte{utxoKeySetUtxoStateV1,
+		utxoKeySetUtxoStateVersion}
+	utxoSetStateKeyNameV1 := []byte("utxosetstate")
+	utxoSetStateKeyNew := prefixedKey(utxoPrefixUtxoStateV1,
+		utxoSetStateKeyNameV1)
+
+	// UTXO set key.
+	utxoPrefixUtxoSetV3 := []byte{utxoKeySetUtxoSetV3, utxoKeySetUtxoSetVersion}
 
 	log.Info("Migrating UTXO database.  This may take a while...")
 	start := time.Now()
@@ -3209,18 +3276,13 @@ func separateUtxoDatabase(ctx context.Context, db database.DB, utxoDb database.D
 	var resumeOffset uint32
 	var totalMigrated uint64
 	var err error
-	doBatch := func(dbTx database.Tx, utxoDbTx database.Tx) (bool, error) {
+	doBatch := func(dbTx database.Tx, tx UtxoBackendTx) (bool, error) {
 		// Get the UTXO set bucket for both the old and the new database.
 		v3UtxoSetBucketOldDb := dbTx.Metadata().Bucket(v3UtxoSetBucketName)
 		if v3UtxoSetBucketOldDb == nil {
 			// If the UTXO set doesn't exist in the old database, return immediately
 			// as there is nothing to do.
 			return true, nil
-		}
-		v3UtxoSetBucketNewDb := utxoDbTx.Metadata().Bucket(v3UtxoSetBucketName)
-		if v3UtxoSetBucketNewDb == nil {
-			return false, fmt.Errorf("bucket %s does not exist",
-				v3UtxoSetBucketName)
 		}
 
 		// Migrate UTXO set entries so long as the max number of entries for this
@@ -3252,7 +3314,8 @@ func separateUtxoDatabase(ctx context.Context, db database.DB, utxoDb database.D
 			resumeOffset++
 
 			// Create the new entry in the V3 bucket.
-			err = v3UtxoSetBucketNewDb.Put(cursor.Key(), cursor.Value())
+			newKey := prefixedKey(utxoPrefixUtxoSetV3, cursor.Key())
+			err = tx.Put(newKey, cursor.Value())
 			if err != nil {
 				return false, err
 			}
@@ -3272,9 +3335,9 @@ func separateUtxoDatabase(ctx context.Context, db database.DB, utxoDb database.D
 	var isFullyDone bool
 	for !isFullyDone {
 		err := db.View(func(dbTx database.Tx) error {
-			err := utxoDb.Update(func(utxoDbTx database.Tx) error {
+			return utxoBackend.Update(func(tx UtxoBackendTx) error {
 				var err error
-				isFullyDone, err = doBatch(dbTx, utxoDbTx)
+				isFullyDone, err = doBatch(dbTx, tx)
 				if errors.Is(err, errInterruptRequested) ||
 					errors.Is(err, errBatchFinished) {
 
@@ -3282,11 +3345,10 @@ func separateUtxoDatabase(ctx context.Context, db database.DB, utxoDb database.D
 					// and therefore outstanding work is written to disk.  The outer
 					// function will exit with an interrupted error below due to
 					// another interrupted check.
-					err = nil
+					return nil
 				}
 				return err
 			})
-			return err
 		})
 		if err != nil {
 			return err
@@ -3308,7 +3370,7 @@ func separateUtxoDatabase(ctx context.Context, db database.DB, utxoDb database.D
 	// Get the UTXO set state from the old database.
 	var serialized []byte
 	err = db.View(func(dbTx database.Tx) error {
-		serialized = dbTx.Metadata().Get(v1UtxoSetStateKeyName)
+		serialized = dbTx.Metadata().Get(utxoSetStateKeyNameV1)
 		return nil
 	})
 	if err != nil {
@@ -3317,25 +3379,18 @@ func separateUtxoDatabase(ctx context.Context, db database.DB, utxoDb database.D
 
 	if serialized != nil {
 		// Set the UTXO set state in the new database.
-		err = utxoDb.Update(func(utxoDbTx database.Tx) error {
-			return utxoDbTx.Metadata().Put(v1UtxoSetStateKeyName, serialized)
+		err = utxoBackend.Update(func(tx UtxoBackendTx) error {
+			return tx.Put(utxoSetStateKeyNew, serialized)
 		})
 		if err != nil {
 			return err
 		}
 	}
 
-	// Force the UTXO database to flush to disk before removing the UTXO set
-	// and UTXO state from the block database.
-	err = utxoDb.Flush()
-	if err != nil {
-		return err
-	}
-
 	if serialized != nil {
 		// Delete the UTXO set state from the old database.
 		err = db.Update(func(dbTx database.Tx) error {
-			return dbTx.Metadata().Delete(v1UtxoSetStateKeyName)
+			return dbTx.Metadata().Delete(utxoSetStateKeyNameV1)
 		})
 		if err != nil {
 			return err
@@ -3361,6 +3416,293 @@ func separateUtxoDatabase(ctx context.Context, db database.DB, utxoDb database.D
 	// Force the block database to flush to disk to avoid rerunning the migration
 	// in the event of an unclean shutown.
 	return db.Flush()
+}
+
+// fetchLegacyBucketId returns the legacy bucket id for the provided bucket
+// name.  A Get function must be provided to retrieve key/value pairs from the
+// underlying data store.
+func fetchLegacyBucketId(getFn func(key []byte) ([]byte, error),
+	bucketName []byte) ([]byte, error) {
+
+	// bucketIndexPrefix is the prefix used for all entries in the bucket index.
+	bucketIndexPrefix := []byte("bidx")
+
+	// parentBucketId is the parent bucket id.  This is hardcoded to zero here
+	// since none of the legacy UTXO database buckets had parent buckets.
+	parentBucketId := []byte{0x00, 0x00, 0x00, 0x00}
+
+	// Construct the key and fetch the corresponding bucket id from the database.
+	// The serialized bucket index key format is:
+	//   <bucketindexprefix><parentbucketid><bucketname>
+	bucketIdKey := prefixedKey(bucketIndexPrefix, parentBucketId)
+	bucketIdKey = append(bucketIdKey, bucketName...)
+	bucketId, err := getFn(bucketIdKey)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching legacy bucket id for %v bucket: %v",
+			string(bucketName), err)
+	}
+
+	return bucketId, nil
+}
+
+// migrateUtxoDbBuckets migrates the UTXO data to use simple key prefixes rather
+// than buckets.
+func migrateUtxoDbBuckets(ctx context.Context, utxoBackend UtxoBackend) error {
+	// Key names, versions, and prefixes are hardcoded below so that updates do
+	// not affect old upgrades.
+
+	// UTXO key sets and versions.
+	const utxoKeySetDbInfoV1 = 1
+	const utxoKeySetUtxoStateV1 = 2
+	const utxoKeySetUtxoSetV3 = 3
+	const utxoKeySetDbInfoVersion = 1
+	const utxoKeySetUtxoStateVersion = 1
+	const utxoKeySetUtxoSetVersion = 3
+
+	// Legacy buckets.
+	metadataLegacyBucketID := []byte{0x00, 0x00, 0x00, 0x00}
+	utxoSetLegacyBucketName := []byte("utxosetv3")
+	utxoDbInfoLegacyBucketName := []byte("dbinfo")
+	legacyBucketIndexPrefix := []byte("bidx")
+
+	// Database info keys.
+	utxoPrefixDbInfoV1 := []byte{utxoKeySetDbInfoV1, utxoKeySetDbInfoVersion}
+	utxoDbInfoVersionKeyNameV1 := []byte("version")
+	utxoDbInfoCompVerKeyNameV1 := []byte("compver")
+	utxoDbInfoUtxoVerKeyNameV1 := []byte("utxover")
+	utxoDbInfoCreatedKeyNameV1 := []byte("created")
+	utxoDbInfoVersionKeyNew := prefixedKey(utxoPrefixDbInfoV1,
+		utxoDbInfoVersionKeyNameV1)
+	utxoDbInfoCompVerKeyNew := prefixedKey(utxoPrefixDbInfoV1,
+		utxoDbInfoCompVerKeyNameV1)
+	utxoDbInfoUtxoVerKeyNew := prefixedKey(utxoPrefixDbInfoV1,
+		utxoDbInfoUtxoVerKeyNameV1)
+	utxoDbInfoCreatedKeyNew := prefixedKey(utxoPrefixDbInfoV1,
+		utxoDbInfoCreatedKeyNameV1)
+
+	// UTXO state keys.
+	utxoPrefixUtxoStateV1 := []byte{utxoKeySetUtxoStateV1,
+		utxoKeySetUtxoStateVersion}
+	utxoSetStateKeyNameV1 := []byte("utxosetstate")
+	utxoSetStateKeyNew := prefixedKey(utxoPrefixUtxoStateV1,
+		utxoSetStateKeyNameV1)
+
+	// UTXO set key.
+	utxoPrefixUtxoSetV3 := []byte{utxoKeySetUtxoSetV3, utxoKeySetUtxoSetVersion}
+
+	// moveKey is a helper function that uses an existing UTXO backend transaction
+	// to move a key.
+	moveKey := func(tx UtxoBackendTx, oldKey, newKey []byte) error {
+		serialized, err := tx.Get(oldKey)
+		if err != nil {
+			return err
+		}
+		err = tx.Put(newKey, serialized)
+		if err != nil {
+			return err
+		}
+		return tx.Delete(oldKey)
+	}
+
+	// Move the database info from the legacy bucket to the new keys.
+	bucketId, err := fetchLegacyBucketId(utxoBackend.Get,
+		utxoDbInfoLegacyBucketName)
+	if err != nil {
+		return err
+	}
+	if bucketId != nil {
+		err := utxoBackend.Update(func(tx UtxoBackendTx) error {
+			// Move the database version from the legacy bucket to the new key.
+			oldKey := prefixedKey(bucketId, utxoDbInfoVersionKeyNameV1)
+			err = moveKey(tx, oldKey, utxoDbInfoVersionKeyNew)
+			if err != nil {
+				return fmt.Errorf("error migrating database version: %v", err)
+			}
+
+			// Move the database compression version from the legacy bucket to the new
+			// key.
+			oldKey = prefixedKey(bucketId, utxoDbInfoCompVerKeyNameV1)
+			err = moveKey(tx, oldKey, utxoDbInfoCompVerKeyNew)
+			if err != nil {
+				return fmt.Errorf("error migrating database compression version: %v",
+					err)
+			}
+
+			// Move the database UTXO set version from the legacy bucket to the new
+			// key.
+			oldKey = prefixedKey(bucketId, utxoDbInfoUtxoVerKeyNameV1)
+			err = moveKey(tx, oldKey, utxoDbInfoUtxoVerKeyNew)
+			if err != nil {
+				return fmt.Errorf("error migrating UTXO set version: %v", err)
+			}
+
+			// Move the database creation date from the legacy bucket to the new key.
+			oldKey = prefixedKey(bucketId, utxoDbInfoCreatedKeyNameV1)
+			err = moveKey(tx, oldKey, utxoDbInfoCreatedKeyNew)
+			if err != nil {
+				return fmt.Errorf("error migrating database creation date: %v", err)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	// Move the UTXO set state from the legacy bucket to the new key.
+	err = utxoBackend.Update(func(tx UtxoBackendTx) error {
+		oldKey := prefixedKey(metadataLegacyBucketID, utxoSetStateKeyNameV1)
+		err = moveKey(tx, oldKey, utxoSetStateKeyNew)
+		if err != nil {
+			return fmt.Errorf("error migrating UTXO set state: %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	log.Info("Migrating UTXO database.  This may take a while...")
+	start := time.Now()
+
+	// Move the UTXO set from the legacy bucket to the new keys.
+	bucketId, err = fetchLegacyBucketId(utxoBackend.Get, utxoSetLegacyBucketName)
+	if err != nil {
+		return err
+	}
+	if bucketId != nil {
+		// doBatch contains the primary logic for migrating the UTXO set.  This is
+		// done because attempting to migrate in a single database transaction could
+		// result in massive memory usage and could potentially crash on many systems
+		// due to ulimits.
+		//
+		// It returns whether or not all entries have been updated.
+		const maxEntries = 20000
+		var totalMigrated uint64
+		var err error
+		doBatch := func(tx UtxoBackendTx) (bool, error) {
+			// Migrate UTXO set entries so long as the max number of entries for this
+			// batch has not been exceeded.
+			var logProgress bool
+			var numMigrated uint32
+
+			iter := tx.NewIterator(bucketId)
+			defer iter.Release()
+			for iter.Next() {
+				// Reset err on each iteration.
+				err = nil
+
+				if interruptRequested(ctx) {
+					logProgress = true
+					err = errInterruptRequested
+					break
+				}
+
+				if numMigrated >= maxEntries {
+					logProgress = true
+					err = errBatchFinished
+					break
+				}
+
+				// Move the UTXO set entry to the new key.
+				oldKey := iter.Key()
+				newKey := prefixedKey(utxoPrefixUtxoSetV3, oldKey[len(bucketId):])
+				err = moveKey(tx, oldKey, newKey)
+				if err != nil {
+					return false, fmt.Errorf("error migrating UTXO set entry: %v", err)
+				}
+
+				numMigrated++
+			}
+			iterErr := iter.Error()
+			if iterErr != nil {
+				return false, iterErr
+			}
+			isFullyDone := err == nil
+			if (isFullyDone || logProgress) && numMigrated > 0 {
+				totalMigrated += uint64(numMigrated)
+				log.Infof("Migrated %d entries (%d total)", numMigrated,
+					totalMigrated)
+			}
+			return isFullyDone, err
+		}
+
+		// Migrate all entries in batches for the reasons mentioned above.
+		if err := utxoBackendBatchedUpdate(ctx, utxoBackend, doBatch); err != nil {
+			return err
+		}
+
+		elapsed := time.Since(start).Round(time.Millisecond)
+		log.Infof("Done migrating UTXO database.  Total entries: %d in %v",
+			totalMigrated, elapsed)
+
+		if interruptRequested(ctx) {
+			return errInterruptRequested
+		}
+	}
+
+	// Drop legacy bucket index entries since they are no longer needed.
+	err = utxoBackend.Update(func(tx UtxoBackendTx) error {
+		iter := tx.NewIterator(legacyBucketIndexPrefix)
+		defer iter.Release()
+		for iter.Next() {
+			err := tx.Delete(iter.Key())
+			if err != nil {
+				return err
+			}
+		}
+		return iter.Error()
+	})
+	if err != nil {
+		return err
+	}
+
+	// Drop remaining legacy metadata bucket entries since they are no longer
+	// needed.
+	return utxoBackend.Update(func(tx UtxoBackendTx) error {
+		iter := tx.NewIterator(metadataLegacyBucketID)
+		defer iter.Release()
+		for iter.Next() {
+			err := tx.Delete(iter.Key())
+			if err != nil {
+				return err
+			}
+		}
+		return iter.Error()
+	})
+}
+
+// upgradeUtxoDbToVersion2 upgrades a UTXO database from version 1 to version 2.
+func upgradeUtxoDbToVersion2(ctx context.Context, utxoBackend UtxoBackend) error {
+	if interruptRequested(ctx) {
+		return errInterruptRequested
+	}
+
+	log.Info("Upgrading UTXO database to version 2...")
+	start := time.Now()
+
+	// Migrate the UTXO data to use simple key prefixes rather than buckets.
+	err := migrateUtxoDbBuckets(ctx, utxoBackend)
+	if err != nil {
+		return err
+	}
+
+	// Fetch the backend versioning info.
+	utxoDbInfo, err := utxoBackend.FetchInfo()
+	if err != nil {
+		return err
+	}
+
+	// Update and persist the UTXO database version.
+	utxoDbInfo.version = 2
+	err = utxoBackend.PutInfo(utxoDbInfo)
+	if err != nil {
+		return err
+	}
+
+	elapsed := time.Since(start).Round(time.Millisecond)
+	log.Infof("Done upgrading database in %v.", elapsed)
+	return nil
 }
 
 // checkDBTooOldToUpgrade returns an ErrDBTooOldToUpgrade error if the provided
@@ -3509,12 +3851,19 @@ func upgradeSpendJournal(ctx context.Context, b *BlockChain) error {
 // backend info housed in the passed utxo backend instance will be updated with
 // the latest versions.
 func upgradeUtxoDb(ctx context.Context, db database.DB,
-	utxoBackend *LevelDbUtxoBackend) error {
+	utxoBackend UtxoBackend) error {
 
 	// Fetch the backend versioning info.
 	utxoDbInfo, err := utxoBackend.FetchInfo()
 	if err != nil {
 		return err
+	}
+
+	// Update to a version 2 UTXO database as needed.
+	if utxoDbInfo.version == 1 {
+		if err := upgradeUtxoDbToVersion2(ctx, utxoBackend); err != nil {
+			return err
+		}
 	}
 
 	// Update to a version 3 utxo set as needed.
@@ -3536,7 +3885,7 @@ func upgradeUtxoDb(ctx context.Context, db database.DB,
 		return nil
 	})
 	if blockDbUtxoSetExists {
-		err := separateUtxoDatabase(ctx, db, utxoBackend.db)
+		err := separateUtxoDatabase(ctx, db, utxoBackend)
 		if err != nil {
 			return err
 		}

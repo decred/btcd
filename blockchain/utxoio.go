@@ -68,12 +68,16 @@ var maxUint32VLQSerializeSize = serializeSizeVLQ(1<<32 - 1)
 // serialize as a VLQ.
 var maxUint8VLQSerializeSize = serializeSizeVLQ(1<<8 - 1)
 
+// utxoSetDbPrefixSize is the number of bytes that the prefx for UTXO set
+// entries takes.
+var utxoSetDbPrefixSize = len(utxoPrefixUtxoSet)
+
 // outpointKeyPool defines a concurrent safe free list of byte slices used to
 // provide temporary buffers for outpoint database keys.
 var outpointKeyPool = sync.Pool{
 	New: func() interface{} {
-		b := make([]byte, chainhash.HashSize+maxUint8VLQSerializeSize+
-			maxUint32VLQSerializeSize)
+		b := make([]byte, utxoSetDbPrefixSize+chainhash.HashSize+
+			maxUint8VLQSerializeSize+maxUint32VLQSerializeSize)
 		return &b // Pointer to slice to avoid boxing alloc.
 	},
 }
@@ -91,10 +95,12 @@ func outpointKey(outpoint wire.OutPoint) *[]byte {
 	key := outpointKeyPool.Get().(*[]byte)
 	tree := uint64(outpoint.Tree)
 	idx := uint64(outpoint.Index)
-	*key = (*key)[:chainhash.HashSize+serializeSizeVLQ(tree) +
-		+serializeSizeVLQ(idx)]
-	copy(*key, outpoint.Hash[:])
-	offset := chainhash.HashSize
+	*key = (*key)[:utxoSetDbPrefixSize+chainhash.HashSize+
+		serializeSizeVLQ(tree)+serializeSizeVLQ(idx)]
+	copy(*key, utxoPrefixUtxoSet)
+	offset := utxoSetDbPrefixSize
+	copy((*key)[offset:], outpoint.Hash[:])
+	offset += chainhash.HashSize
 	offset += putVLQ((*key)[offset:], tree)
 	putVLQ((*key)[offset:], idx)
 	return key
@@ -102,14 +108,17 @@ func outpointKey(outpoint wire.OutPoint) *[]byte {
 
 // decodeOutpointKey decodes the passed serialized key into the passed outpoint.
 func decodeOutpointKey(serialized []byte, outpoint *wire.OutPoint) error {
-	if chainhash.HashSize >= len(serialized) {
+	if utxoSetDbPrefixSize+chainhash.HashSize >= len(serialized) {
 		return errDeserialize("unexpected length for serialized outpoint key")
 	}
 
+	// Ignore the UTXO set prefix.
+	offset := utxoSetDbPrefixSize
+
 	// Deserialize the hash.
 	var hash chainhash.Hash
-	copy(hash[:], serialized[:chainhash.HashSize])
-	offset := chainhash.HashSize
+	copy(hash[:], serialized[offset:offset+chainhash.HashSize])
+	offset += chainhash.HashSize
 
 	// Deserialize the tree.
 	tree, bytesRead := deserializeVLQ(serialized[offset:])

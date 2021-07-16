@@ -282,8 +282,7 @@ func TestCheckBlockHeaderContext(t *testing.T) {
 	defer teardownDb()
 
 	// Create a test UTXO database.
-	utxoDb, teardownUtxoDb, err := createTestDatabase(dbName+"_utxo", testDbType,
-		params.Net)
+	utxoDb, teardownUtxoDb, err := createTestUtxoDatabase(dbName + "_utxo")
 	if err != nil {
 		t.Fatalf("Failed to create UTXO database: %v\n", err)
 	}

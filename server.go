@@ -48,6 +48,7 @@ import (
 	"github.com/decred/dcrd/peer/v3"
 	"github.com/decred/dcrd/txscript/v4"
 	"github.com/decred/dcrd/wire"
+	"github.com/syndtr/goleveldb/leveldb"
 )
 
 const (
@@ -3290,7 +3291,7 @@ func setupRPCListeners() ([]net.Listener, error) {
 // decred network type specified by chainParams.  Use start to begin accepting
 // connections from peers.
 func newServer(ctx context.Context, listenAddrs []string, db database.DB,
-	utxoDb database.DB, chainParams *chaincfg.Params,
+	utxoDb *leveldb.DB, chainParams *chaincfg.Params,
 	dataDir string) (*server, error) {
 
 	amgr := addrmgr.New(cfg.DataDir, dcrdLookup)
