@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2021 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,26 +8,42 @@ package addrmgr
 import (
 	"sync"
 	"time"
-
-	"github.com/decred/dcrd/wire"
 )
 
 // KnownAddress tracks information about a known network address that is used
 // to determine how viable an address is.
 type KnownAddress struct {
-	mtx         sync.Mutex
-	na          *wire.NetAddress
-	srcAddr     *wire.NetAddress
+	// mtx is used to ensure safe concurrent access to methods on a known
+	// address instance.
+	mtx sync.Mutex
+
+	// na is the primary network address that the known address represents.
+	na *NetAddress
+
+	// srcAddr is the network address of the peer that suggested the primary
+	// network address.
+	srcAddr *NetAddress
+
+	// The following fields track the attempts made to connect to the primary
+	// network address.  Initially connecting to a peer counts as an attempt,
+	// and a successful version message exchange resets the number of attempts
+	// to zero.
 	attempts    int
 	lastattempt time.Time
 	lastsuccess time.Time
-	tried       bool
-	refs        int // reference count of new buckets
+
+	// tried indicates whether the address currently exists in a tried bucket.
+	tried bool
+
+	// refs represents the total number of new buckets that the known address
+	// exists in.  This is updated as the address moves between new and tried
+	// buckets.
+	refs int
 }
 
 // NetAddress returns the underlying wire.NetAddress associated with the
 // known address.
-func (ka *KnownAddress) NetAddress() *wire.NetAddress {
+func (ka *KnownAddress) NetAddress() *NetAddress {
 	ka.mtx.Lock()
 	defer ka.mtx.Unlock()
 	return ka.na

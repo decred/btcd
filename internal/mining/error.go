@@ -1,10 +1,10 @@
-// Copyright (c) 2015-2020 The Decred developers
+// Copyright (c) 2015-2021 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package mining
 
-// ErrorKind identifies a mining of error.  It has full support for errors.Is
+// ErrorKind identifies a kind of error.  It has full support for errors.Is
 // and errors.As, so the caller can directly check against an error kind
 // when determining the reason for an error.
 type ErrorKind string

@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2021 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,15 +8,13 @@ package addrmgr
 import (
 	"net"
 	"testing"
-
-	"github.com/decred/dcrd/wire"
 )
 
 // TestIPTypes ensures the various functions which determine the type of an IP
 // address based on RFCs work as intended.
 func TestIPTypes(t *testing.T) {
 	type ipTest struct {
-		in       wire.NetAddress
+		ip       net.IP
 		rfc1918  bool
 		rfc2544  bool
 		rfc3849  bool
@@ -39,8 +37,7 @@ func TestIPTypes(t *testing.T) {
 		rfc4193, rfc4380, rfc4843, rfc4862, rfc5737, rfc6052, rfc6145, rfc6598,
 		local, valid, routable bool) ipTest {
 		nip := net.ParseIP(ip)
-		na := *wire.NewNetAddressIPPort(nip, 8333, wire.SFNodeNetwork)
-		test := ipTest{na, rfc1918, rfc2544, rfc3849, rfc3927, rfc3964, rfc4193, rfc4380,
+		test := ipTest{nip, rfc1918, rfc2544, rfc3849, rfc3927, rfc3964, rfc4193, rfc4380,
 			rfc4843, rfc4862, rfc5737, rfc6052, rfc6145, rfc6598, local, valid, routable}
 		return test
 	}
@@ -88,56 +85,56 @@ func TestIPTypes(t *testing.T) {
 
 	t.Logf("Running %d tests", len(tests))
 	for _, test := range tests {
-		if rv := isRFC1918(&test.in); rv != test.rfc1918 {
-			t.Errorf("isRFC1918 %s\n got: %v want: %v", test.in.IP, rv, test.rfc1918)
+		if rv := isRFC1918(test.ip); rv != test.rfc1918 {
+			t.Errorf("isRFC1918 %s\n got: %v want: %v", test.ip, rv, test.rfc1918)
 		}
 
-		if rv := isRFC3849(&test.in); rv != test.rfc3849 {
-			t.Errorf("isRFC3849 %s\n got: %v want: %v", test.in.IP, rv, test.rfc3849)
+		if rv := isRFC3849(test.ip); rv != test.rfc3849 {
+			t.Errorf("isRFC3849 %s\n got: %v want: %v", test.ip, rv, test.rfc3849)
 		}
 
-		if rv := isRFC3927(&test.in); rv != test.rfc3927 {
-			t.Errorf("isRFC3927 %s\n got: %v want: %v", test.in.IP, rv, test.rfc3927)
+		if rv := isRFC3927(test.ip); rv != test.rfc3927 {
+			t.Errorf("isRFC3927 %s\n got: %v want: %v", test.ip, rv, test.rfc3927)
 		}
 
-		if rv := isRFC3964(&test.in); rv != test.rfc3964 {
-			t.Errorf("isRFC3964 %s\n got: %v want: %v", test.in.IP, rv, test.rfc3964)
+		if rv := isRFC3964(test.ip); rv != test.rfc3964 {
+			t.Errorf("isRFC3964 %s\n got: %v want: %v", test.ip, rv, test.rfc3964)
 		}
 
-		if rv := isRFC4193(&test.in); rv != test.rfc4193 {
-			t.Errorf("isRFC4193 %s\n got: %v want: %v", test.in.IP, rv, test.rfc4193)
+		if rv := isRFC4193(test.ip); rv != test.rfc4193 {
+			t.Errorf("isRFC4193 %s\n got: %v want: %v", test.ip, rv, test.rfc4193)
 		}
 
-		if rv := isRFC4380(&test.in); rv != test.rfc4380 {
-			t.Errorf("isRFC4380 %s\n got: %v want: %v", test.in.IP, rv, test.rfc4380)
+		if rv := isRFC4380(test.ip); rv != test.rfc4380 {
+			t.Errorf("isRFC4380 %s\n got: %v want: %v", test.ip, rv, test.rfc4380)
 		}
 
-		if rv := isRFC4843(&test.in); rv != test.rfc4843 {
-			t.Errorf("isRFC4843 %s\n got: %v want: %v", test.in.IP, rv, test.rfc4843)
+		if rv := isRFC4843(test.ip); rv != test.rfc4843 {
+			t.Errorf("isRFC4843 %s\n got: %v want: %v", test.ip, rv, test.rfc4843)
 		}
 
-		if rv := isRFC4862(&test.in); rv != test.rfc4862 {
-			t.Errorf("isRFC4862 %s\n got: %v want: %v", test.in.IP, rv, test.rfc4862)
+		if rv := isRFC4862(test.ip); rv != test.rfc4862 {
+			t.Errorf("isRFC4862 %s\n got: %v want: %v", test.ip, rv, test.rfc4862)
 		}
 
-		if rv := isRFC6052(&test.in); rv != test.rfc6052 {
-			t.Errorf("isRFC6052 %s\n got: %v want: %v", test.in.IP, rv, test.rfc6052)
+		if rv := isRFC6052(test.ip); rv != test.rfc6052 {
+			t.Errorf("isRFC6052 %s\n got: %v want: %v", test.ip, rv, test.rfc6052)
 		}
 
-		if rv := isRFC6145(&test.in); rv != test.rfc6145 {
-			t.Errorf("isRFC1918 %s\n got: %v want: %v", test.in.IP, rv, test.rfc6145)
+		if rv := isRFC6145(test.ip); rv != test.rfc6145 {
+			t.Errorf("isRFC1918 %s\n got: %v want: %v", test.ip, rv, test.rfc6145)
 		}
 
-		if rv := isLocal(&test.in); rv != test.local {
-			t.Errorf("isLocal %s\n got: %v want: %v", test.in.IP, rv, test.local)
+		if rv := isLocal(test.ip); rv != test.local {
+			t.Errorf("isLocal %s\n got: %v want: %v", test.ip, rv, test.local)
 		}
 
-		if rv := isValid(&test.in); rv != test.valid {
-			t.Errorf("IsValid %s\n got: %v want: %v", test.in.IP, rv, test.valid)
+		if rv := isValid(test.ip); rv != test.valid {
+			t.Errorf("IsValid %s\n got: %v want: %v", test.ip, rv, test.valid)
 		}
 
-		if rv := IsRoutable(&test.in); rv != test.routable {
-			t.Errorf("IsRoutable %s\n got: %v want: %v", test.in.IP, rv, test.routable)
+		if rv := isRoutable(test.ip); rv != test.routable {
+			t.Errorf("IsRoutable %s\n got: %v want: %v", test.ip, rv, test.routable)
 		}
 	}
 }
@@ -192,11 +189,10 @@ func TestGroupKey(t *testing.T) {
 
 	for i, test := range tests {
 		nip := net.ParseIP(test.ip)
-		na := *wire.NewNetAddressIPPort(nip, 8333, wire.SFNodeNetwork)
-		if key := GroupKey(&na); key != test.expected {
+		na := NewNetAddressIPPort(nip, 8333, sfNodeNetwork)
+		if key := na.GroupKey(); key != test.expected {
 			t.Errorf("TestGroupKey #%d (%s): unexpected group key "+
-				"- got '%s', want '%s'", i, test.name,
-				key, test.expected)
+				"- got '%s', want '%s'", i, test.name, key, test.expected)
 		}
 	}
 }
