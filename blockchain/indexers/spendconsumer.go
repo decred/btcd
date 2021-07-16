@@ -52,11 +52,12 @@ func (s *SpendConsumer) NeedSpendData(hash *chainhash.Hash) (bool, error) {
 		return false, nil
 	}
 
-	tipHeight, err := s.queryer.BlockHeightByHash(tipHash)
+	tipHeader, err := s.queryer.BlockHeaderByHash(tipHash)
 	if err != nil {
 		return false, err
 	}
-	height, err := s.queryer.BlockHeightByHash(hash)
+
+	header, err := s.queryer.BlockHeaderByHash(hash)
 	if err != nil {
 		return false, err
 	}
@@ -64,14 +65,14 @@ func (s *SpendConsumer) NeedSpendData(hash *chainhash.Hash) (bool, error) {
 	// The spend consumer does not need the spend journal
 	// data associated with the provided block hash if
 	// its current tip is below the provided hash.
-	if height > tipHeight {
+	if header.Height > tipHeader.Height {
 		return false, nil
 	}
 
 	// The spend consumer does not need the spend data associated
 	// with the provided block hash if the block is not an ancestor
 	// of the current tip.
-	blockHash := s.queryer.Ancestor(tipHash, height)
+	blockHash := s.queryer.Ancestor(tipHash, int64(header.Height))
 	if !blockHash.IsEqual(hash) {
 		return false, nil
 	}

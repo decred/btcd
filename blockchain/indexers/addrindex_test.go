@@ -311,6 +311,11 @@ func TestAddrIndexAsync(t *testing.T) {
 	subber := NewIndexSubscriber(ctx)
 	go subber.Run(ctx)
 
+	err = AddIndexSpendConsumers(db, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	txIdx, err := NewTxIndex(subber, db, chain)
 	if err != nil {
 		t.Fatal(err)

@@ -3405,6 +3405,11 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB,
 	}
 
 	queryer := &blockchain.ChainQueryerAdapter{BlockChain: s.chain}
+	err = indexers.AddIndexSpendConsumers(s.db, queryer)
+	if err != nil {
+		return nil, err
+	}
+
 	if cfg.TxIndex || cfg.AddrIndex {
 		// Enable transaction index if address index is enabled since it
 		// requires it.

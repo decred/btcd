@@ -67,6 +67,9 @@ type ChainQueryer interface {
 	// Best returns the height and hash of the current best block.
 	Best() (int64, *chainhash.Hash)
 
+	// BlockHeaderByHash returns the block header identified by the given hash.
+	BlockHeaderByHash(hash *chainhash.Hash) (wire.BlockHeader, error)
+
 	// BlockHashByHeight returns the hash of the block at the given height in
 	// the main chain.
 	BlockHashByHeight(int64) (*chainhash.Hash, error)
@@ -84,6 +87,11 @@ type ChainQueryer interface {
 
 	// AddSpendConsumer adds the provided spend consumer.
 	AddSpendConsumer(consumer spendpruner.SpendConsumer)
+
+	// FetchSpendConsumer returns the spend journal consumer associated with
+	// the provided id.
+	FetchSpendConsumer(id string) (spendpruner.SpendConsumer, error)
+
 	// PrevScripts returns a source of previous transaction scripts and their
 	// associated versions spent by the given block.
 	PrevScripts(database.Tx, *dcrutil.Block) (PrevScripter, error)
@@ -756,5 +764,22 @@ func updateIndex(ctx context.Context, indexer Indexer, ntfn *IndexNtfn) error {
 		return err
 	}
 
+	return nil
+}
+
+// AddIndexSpendConsumers adds spend consumers for applicable optional indexes
+// to the chain queryer.
+func AddIndexSpendConsumers(db database.DB, chain ChainQueryer) error {
+	// Only the address index requires a spend consumer currently.
+	_, tipHash, err := tip(db, addrIndexKey)
+	if err != nil {
+		if !errors.Is(err, database.ErrValueNotFound) &&
+			!errors.Is(err, database.ErrBucketNotFound) {
+			return fmt.Errorf("unable to fetch index tip for "+
+				"address index %w", err)
+		}
+	}
+
+	chain.AddSpendConsumer(NewSpendConsumer(addrIndexName, tipHash, chain))
 	return nil
 }

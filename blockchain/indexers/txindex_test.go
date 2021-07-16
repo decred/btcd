@@ -32,6 +32,7 @@ type testChain struct {
 	keyedByHeight  map[int64]*dcrutil.Block
 	keyedByHash    map[string]*dcrutil.Block
 	orphans        map[string]*dcrutil.Block
+	consumers      map[string]spendpruner.SpendConsumer
 	mtx            sync.Mutex
 }
 
@@ -41,6 +42,7 @@ func newTestChain() (*testChain, error) {
 		keyedByHeight: make(map[int64]*dcrutil.Block),
 		keyedByHash:   make(map[string]*dcrutil.Block),
 		orphans:       make(map[string]*dcrutil.Block),
+		consumers:     make(map[string]spendpruner.SpendConsumer),
 	}
 	genesis := dcrutil.NewBlock(chaincfg.SimNetParams().GenesisBlock)
 	return tc, tc.AddBlock(genesis)
@@ -168,7 +170,22 @@ func (tc *testChain) Ancestor(block *chainhash.Hash, height int64) *chainhash.Ha
 
 // AddSpendConsumer adds the provided spend consumer.
 func (tc *testChain) AddSpendConsumer(consumer spendpruner.SpendConsumer) {
-	// Do nothing.
+	tc.mtx.Lock()
+	tc.consumers[consumer.ID()] = consumer
+	tc.mtx.Unlock()
+}
+
+// FetchSpendConsumer returns the spend journal consumer associated with
+// the provided id.
+func (tc *testChain) FetchSpendConsumer(id string) (spendpruner.SpendConsumer, error) {
+	tc.mtx.Lock()
+	defer tc.mtx.Unlock()
+	consumer, ok := tc.consumers[id]
+	if !ok {
+		return nil, fmt.Errorf("no spend consumer found with id %s", id)
+	}
+
+	return consumer, nil
 }
 
 // ChainParams returns the parameters of the chain.
@@ -204,6 +221,23 @@ func (tc *testChain) BlockByHash(hash *chainhash.Hash) (*dcrutil.Block, error) {
 	}
 
 	return blk, nil
+}
+
+// BlockHeaderByHash returns the block header identified by the given hash.
+func (tc *testChain) BlockHeaderByHash(hash *chainhash.Hash) (wire.BlockHeader, error) {
+	tc.mtx.Lock()
+	defer tc.mtx.Unlock()
+
+	blk := tc.keyedByHash[hash.String()]
+	if blk == nil {
+		blk = tc.orphans[hash.String()]
+		if blk == nil {
+			return wire.BlockHeader{}, fmt.Errorf("no block found with "+
+				"hash %s", hash.String())
+		}
+	}
+
+	return blk.MsgBlock().Header, nil
 }
 
 // PrevScripts returns a source of previous transaction scripts and their

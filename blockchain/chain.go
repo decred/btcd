@@ -2194,6 +2194,17 @@ func (q *ChainQueryerAdapter) AddSpendConsumer(consumer spendpruner.SpendConsume
 	q.spendPruner.AddConsumer(consumer)
 }
 
+// FetchSpendConsumer returns the spend journal consumer associated with the
+// provided id.
+func (q *ChainQueryerAdapter) FetchSpendConsumer(id string) (spendpruner.SpendConsumer, error) {
+	return q.spendPruner.FetchConsumer(id)
+}
+
+// BlockHeaderByHash returns the block header identified by the given hash.
+func (q *ChainQueryerAdapter) BlockHeaderByHash(hash *chainhash.Hash) (wire.BlockHeader, error) {
+	return q.HeaderByHash(hash)
+}
+
 // SpendPrunerHandler processes incoming spending pruner signals.
 func (b *BlockChain) SpendPrunerHandler(ctx context.Context) {
 	b.spendPruner.HandleSignals(ctx)

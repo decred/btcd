@@ -1143,8 +1143,17 @@ func NewAddrIndex(subscriber *IndexSubscriber, db database.DB, chain ChainQuerye
 		cancel:      subscriber.cancel,
 	}
 
-	idx.consumer = NewSpendConsumer(idx.Name(), nil, chain)
-	chain.AddSpendConsumer(idx.consumer)
+	sc, err := chain.FetchSpendConsumer(idx.Name())
+	if err != nil {
+		return nil, err
+	}
+
+	consumer, ok := sc.(*SpendConsumer)
+	if !ok {
+		return nil, errors.New("consumer not of type SpendConsumer")
+	}
+
+	idx.consumer = consumer
 
 	// The address index is an optional index. It depends on the
 	// transaction index and as a result synchronously updates with it.
