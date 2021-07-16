@@ -3039,6 +3039,14 @@ func (s *server) Run(ctx context.Context) {
 		}
 	}
 
+	// Start the chain's spend pruner handler which processes spend journal
+	// prune signals.
+	s.wg.Add(1)
+	go func(ctx context.Context, s *server) {
+		s.chain.SpendPrunerHandler(ctx)
+		s.wg.Done()
+	}(ctx, s)
+
 	// Wait until the server is signalled to shutdown.
 	<-ctx.Done()
 	atomic.AddInt32(&s.shutdown, 1)

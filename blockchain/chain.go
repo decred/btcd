@@ -16,6 +16,7 @@ import (
 	"github.com/decred/dcrd/blockchain/stake/v4"
 	"github.com/decred/dcrd/blockchain/standalone/v2"
 	"github.com/decred/dcrd/blockchain/v4/indexers"
+	"github.com/decred/dcrd/blockchain/v4/internal/spendpruner"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/chaincfg/v3"
 	"github.com/decred/dcrd/database/v2"
@@ -242,6 +243,10 @@ type BlockChain struct {
 	calcPriorStakeVersionCache    map[[chainhash.HashSize]byte]uint32
 	calcVoterVersionIntervalCache map[[chainhash.HashSize]byte]uint32
 	calcStakeVersionCache         map[[chainhash.HashSize]byte]uint32
+
+	// spendPruner prunes spend journal data for disconnected blocks
+	// if there are no consumers left for it.
+	spendPruner *spendpruner.SpendJournalPruner
 }
 
 const (
@@ -703,6 +708,9 @@ func (b *BlockChain) connectBlock(node *blockNode, block, parent *dcrutil.Block,
 	b.stateSnapshot = state
 	b.stateLock.Unlock()
 
+	// Notify the spend pruner of the connected block.
+	go b.spendPruner.NotifyConnectedBlock(block.Hash())
+
 	// Notify the caller that the block was connected to the main chain.
 	// The caller would typically want to react with actions such as
 	// updating wallets.
@@ -869,14 +877,9 @@ func (b *BlockChain) disconnectBlock(node *blockNode, block, parent *dcrutil.Blo
 		return err
 	}
 
-	// Update the transaction spend journal by removing the record that contains
-	// all txos spent by the block.  This is intentionally done AFTER the utxo
-	// cache has been force flushed since the spend journal information will no
-	// longer be available for the cache to use for recovery purposes after being
-	// removed.
-	err = b.db.Update(func(dbTx database.Tx) error {
-		return dbRemoveSpendJournalEntry(dbTx, block.Hash())
-	})
+	// Prune the associated spend data for the provided block hash if there
+	// are no spend dependencies for it.
+	err = b.spendPruner.MaybePruneSpendData(block.Hash())
 	if err != nil {
 		return err
 	}
@@ -2112,6 +2115,31 @@ func (q *chainQueryerAdapter) PrevScripts(dbTx database.Tx, block *dcrutil.Block
 	return prevScripts, nil
 }
 
+// SpendPrunerHandler processes incoming spending pruner signals.
+func (b *BlockChain) SpendPrunerHandler(ctx context.Context) {
+	b.spendPruner.HandleSignals(ctx)
+}
+
+// Ensure spendPurgerAdapter implements the spendpruner.SpendPurger interface.
+var _ spendpruner.SpendPurger = (*spendPurgerAdapter)(nil)
+
+// spendPurgerAdapter provides an adapter from a blockchain
+// instance to the spendpruner.SpendPurger interface.
+type spendPurgerAdapter struct {
+	*BlockChain
+}
+
+// RemoveSpendEntry purges the associated spend journal entry of the
+// provided block hash.
+//
+// This function is safe for concurrent access and is part of the
+// spendPruner.SpendPurger interface.
+func (s *spendPurgerAdapter) RemoveSpendEntry(hash *chainhash.Hash) error {
+	return s.db.Update(func(dbTx database.Tx) error {
+		return dbRemoveSpendJournalEntry(dbTx, hash)
+	})
+}
+
 // Config is a descriptor which specifies the blockchain instance configuration.
 type Config struct {
 	// DB defines the database which houses the blocks and will be used to
@@ -2279,6 +2307,13 @@ func New(ctx context.Context, config *Config) (*BlockChain, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	spendPrunerAdapter := &spendPurgerAdapter{BlockChain: &b}
+	b.spendPruner, err = spendpruner.NewSpendJournalPruner(b.db,
+		spendPrunerAdapter)
+	if err != nil {
+		return nil, err
 	}
 
 	log.Infof("Blockchain database version info: chain: %d, compression: "+
