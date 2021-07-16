@@ -142,7 +142,7 @@ func TestErrorKindIsAs(t *testing.T) {
 			continue
 		}
 
-		// Ensure the underlying error kind can be unwrapped is and is the
+		// Ensure the underlying error kind can be unwrapped and is the
 		// expected kind.
 		var kind ErrorKind
 		if !errors.As(test.err, &kind) {
